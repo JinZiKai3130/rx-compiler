@@ -2,6 +2,9 @@
 
 include config.mk
 
+# --- Kotlin compiler build (see compiler.mk): `make compiler` ---
+include compiler.mk
+
 PYTHON ?= python3
 VERBOSE ?= false
 # Directory paths below tests, joined with ':'; separate selections with ','.

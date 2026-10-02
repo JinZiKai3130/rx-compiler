@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Rx compiler launcher. Build first with `make compiler`.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+ANTLR_JAR="${ANTLR_JAR:-$HOME/tools/antlr/antlr-4.13.2-complete.jar}"
+KOTLIN_STDLIB="${KOTLIN_STDLIB:-$HOME/tools/kotlinc/lib/kotlin-stdlib.jar}"
+
+exec java -cp "$ROOT/build/kotlin-classes:$ROOT/build/classes:$ANTLR_JAR:$KOTLIN_STDLIB" rx.MainKt "$@"
