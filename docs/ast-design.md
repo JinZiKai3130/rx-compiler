@@ -1,8 +1,4 @@
-# Rx 编译器 AST 设计（阶段 2.4.1）
-
-> 状态：**已定稿**（2026-10-02）。
-> 已确认的三点：① if/loop/while/block 归 **Expr 族**；② 位置存 **起点 + 范围（span）**；③ `ExprNode` **现在就带 Type 槽**（与手册 §2.4.1 一致）。
-> 依据：手册 §2.4；文法 `grammar/Lexer.g4`、`grammar/Parser.g4`；官方用例 `tests/official/**`。
+# Rx 编译器 AST 设计
 
 ---
 
