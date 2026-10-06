@@ -107,3 +107,85 @@ class IndexExprNode(
 ) : ExprNode(span) {
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
 }
+
+/* continue */
+class ContinueExprNode(
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+/* break */
+class BreakExprNode(
+    val value: ExprNode?,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+/* return */
+class ReturnExprNode(
+    val value: ExprNode?,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+/* 类型转换 */
+class CastExprNode(
+    val expr: ExprNode,
+    val targetType: TypeRefNode,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+class LoopExprNode(
+    val block: BlockExprNode,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+class WhileExprNode(
+    val block: BlockExprNode,
+    val condition: ExprNode,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+class IfExprNode(
+    val condition: ExprNode,
+    val thenblock: BlockExprNode,
+    val elseBranch: ExprNode?,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+class ArrayLitNode(
+    val elements: List<ExprNode>,
+    val repeat: ArrayRepeat?,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+data class ArrayRepeat(
+    val element: ExprNode,
+    val length: ExprNode,
+)
+
+class StructLitNode(
+    val path: List<String>,
+    val fields: List<StructLitField>,
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
+data class StructLitField(
+    val name: String,
+    val value: ExprNode,
+)
