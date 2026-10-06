@@ -8,7 +8,6 @@ class CrateNode(
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
 }
 
-/** use 声明：use a::b; / use a::b as c; / use a::*;（花括号组留到第三刀） */
 class UseNode(
     val tree: UseTree,
     span: Span,
@@ -16,12 +15,16 @@ class UseNode(
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
 }
 
-/** use 的目标：路径 + 是否通配（*）+ 可选别名（as c）。 */
-data class UseTree(
-    val path: List<String>,
-    val glob: Boolean,
-    val alias: String?,
-)
+sealed interface UseTree
+
+/** 叶子：use a::b; / use a::b as c; / use a::b as _; */
+data class UsePath(val path: List<String>, val alias: String?) : UseTree
+
+/** 通配：use a::*; / use *; / use ::*;（prefix 为空列表表示"无前缀"） */
+data class UseGlob(val prefix: List<String>) : UseTree
+
+/** 分组：use a::{b, c::d}; / use {a, b};——items 每项又是一个 UseTree，可无限嵌套 */
+data class UseGroup(val prefix: List<String>, val items: List<UseTree>) : UseTree
 
 /** 函数参数：普通参数或 self 参数。 */
 sealed interface Param

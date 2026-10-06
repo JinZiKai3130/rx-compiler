@@ -25,9 +25,15 @@ class BoolLitNode(
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
 }
 
-/** 路径表达式：x、a::b、Self::x（先存段名；泛型实参留到第三刀） */
+/** 路径的单个段：名字 + 该段自带的泛型实参（如 Box::<u32> 的 <u32> 挂在 Box 段上）。 */
+data class PathSegment(
+    val name: String,
+    val genericArgs: List<TypeRefNode> = emptyList(),
+)
+
+/** 路径表达式：x、a::b、Self::x、Box::<u32>::new（表达式侧泛型实参必须用 ::< >）。 */
 class PathExprNode(
-    val segments: List<String>,
+    val segments: List<PathSegment>,
     span: Span,
 ) : ExprNode(span) {
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
