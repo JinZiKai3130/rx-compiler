@@ -17,6 +17,7 @@ interface AstVisitor {
     fun visit(n: BlockExprNode)
     fun visit(n: IntLitNode)
     fun visit(n: BoolLitNode)
+    fun visit(n: UnitLitNode)
     fun visit(n: PathExprNode)
     fun visit(n: UnaryExprNode)
     fun visit(n: ReferenceExprNode)

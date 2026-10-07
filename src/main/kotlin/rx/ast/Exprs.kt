@@ -25,6 +25,13 @@ class BoolLitNode(
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
 }
 
+/** 单元字面量：() —— 空括号，值类型是 ()。 */
+class UnitLitNode(
+    span: Span,
+) : ExprNode(span) {
+    override fun accept(visitor: AstVisitor) = visitor.visit(this)
+}
+
 /** 路径的单个段：名字 + 该段自带的泛型实参（如 Box::<u32> 的 <u32> 挂在 Box 段上）。 */
 data class PathSegment(
     val name: String,
