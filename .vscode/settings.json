@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^/home/kai/ACM_class_project/rx-compiler/\\.venv/bin/python -c \"from pypdf import PdfReader; r=PdfReader\\('计算机系统课程设计_编译器_指导手册\\(1\\)\\.pdf'\\); open\\('/tmp/rx_manual\\.txt','w'\\)\\.write\\('\\\\n'\\.join\\(\\(p\\.extract_text\\(\\) or ''\\) for p in r\\.pages\\)\\); print\\(len\\(r\\.pages\\)\\)\" && rg -n -i 'AST\\|抽象语法树\\|builder\\|构建\\|语法树\\|2\\\\\\.4\\|ANTLR' /tmp/rx_manual\\.txt \\| head -100$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
