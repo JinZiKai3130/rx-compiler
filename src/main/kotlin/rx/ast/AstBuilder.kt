@@ -1,7 +1,9 @@
 package rx.ast
 
 import org.antlr.v4.runtime.ParserRuleContext
+import org.antlr.v4.runtime.tree.ParseTree
 import org.antlr.v4.runtime.tree.RuleNode
+import org.antlr.v4.runtime.tree.TerminalNode
 import rx.gen.RxParser
 import rx.gen.RxParserBaseVisitor
 
@@ -322,19 +324,19 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
      */
     private val expressionHandlers: Map<String, (ParserRuleContext) -> AstNode> = mapOf(
         "expression" to this::buildPassThroughExpression,
-        "assignmentExpression" to this::buildPassThroughExpression,
-        "logicalOrExpression" to this::buildPassThroughExpression,
-        "logicalAndExpression" to this::buildPassThroughExpression,
-        "comparisonExpression" to this::buildPassThroughExpression,
-        "bitOrExpression" to this::buildPassThroughExpression,
-        "bitXorExpression" to this::buildPassThroughExpression,
-        "bitAndExpression" to this::buildPassThroughExpression,
-        "shiftExpression" to this::buildPassThroughExpression,
-        "additiveExpression" to this::buildPassThroughExpression,
-        "multiplicativeExpression" to this::buildPassThroughExpression,
-        "castExpression" to this::buildPassThroughExpression,
-        "unaryExpression" to this::buildPassThroughExpression,
-        "postfixExpression" to this::buildPassThroughExpression,
+        "assignmentExpression" to this::buildAssignmentExpression,
+        "logicalOrExpression" to this::buildBinaryExpression,
+        "logicalAndExpression" to this::buildBinaryExpression,
+        "comparisonExpression" to this::buildBinaryExpression,
+        "bitOrExpression" to this::buildBinaryExpression,
+        "bitXorExpression" to this::buildBinaryExpression,
+        "bitAndExpression" to this::buildBinaryExpression,
+        "shiftExpression" to this::buildBinaryExpression,
+        "additiveExpression" to this::buildBinaryExpression,
+        "multiplicativeExpression" to this::buildBinaryExpression,
+        "castExpression" to this::buildCastExpression,
+        "unaryExpression" to this::buildUnaryExpression,
+        "postfixExpression" to this::buildPostfixExpression,
         "primary" to this::buildPassThroughExpression,           // conditionPrimary
         "primaryExpression" to this::buildPassThroughExpression, // primaryExpression
         "nonBlockPrimary" to { ctx ->
@@ -621,6 +623,492 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         return PathExprNode(
             segments = segments,
             span = spanOf(ctx),
+        )
+    }
+
+    // ===== postfix 层（4c）：调用 / 下标 / 字段 / 方法 =====
+
+    /**
+     * postfixExpression : 基底 postfixSuffix*（四家族变体已归一化）。
+     * 第一个孩子是基底（primary 或块），其余孩子从左到右包上去。
+     */
+    private fun buildPostfixExpression(ctx: ParserRuleContext): AstNode {
+        val base = ctx.getChild(0)
+
+        if (base !is ParserRuleContext) {
+            throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+        }
+
+        var accumulator = visit(base) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+
+        for (index in 1 until ctx.childCount) {
+            /* 每次取一个后缀出来，进行出来，放到accumulator累加 */
+            when (val suffix = ctx.getChild(index)) {
+                is RxParser.PostfixSuffixContext ->
+                    accumulator = buildPostfixSuffix(accumulator, suffix)
+
+                is RxParser.DotSuffixContext ->
+                    accumulator = buildDotSuffix(accumulator, suffix)
+
+                else -> throw IllegalArgumentException(
+                    "Unsupported expression '${ctx.text}'"
+                )
+            }
+        }
+
+        return accumulator
+    }
+
+    private fun buildPostfixSuffix(
+        receiver: ExprNode,
+        ctx: RxParser.PostfixSuffixContext
+    ): ExprNode {
+        if (ctx.callArguments() != null) {
+            return CallExprNode(
+                callee = receiver,
+                args = buildCallArguments(ctx.callArguments()),
+                span = spanFrom(receiver.span, ctx),
+            )
+        }
+
+        if (ctx.LBRACKET() != null) {
+            val index = visit(ctx.expression()) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported index expression '${ctx.text}'"
+                )
+
+            return IndexExprNode(
+                receiver = receiver,
+                index = index,
+                span = spanFrom(receiver.span, ctx),
+            )
+        }
+
+        val dotSuffix = ctx.dotSuffix()
+            ?: throw IllegalArgumentException(
+                "Unsupported postfix '${ctx.text}'"
+            )
+
+        return buildDotSuffix(receiver, dotSuffix)
+    }
+
+    /** dotSuffix : DOT pathExprSegment callArguments | DOT identifier */
+    private fun buildDotSuffix(
+        receiver: ExprNode,
+        ctx: RxParser.DotSuffixContext
+    ): ExprNode {
+        val segment = ctx.pathExprSegment()
+        val span = spanFrom(receiver.span, ctx)
+
+        if (segment != null) {
+            // 方法调用：DOT pathExprSegment callArguments
+            if (segment.genericArgs() != null) {
+                throw IllegalArgumentException(
+                    "Generic method arguments are not supported yet"
+                )
+            }
+
+            val callArguments = ctx.callArguments()
+                ?: throw IllegalArgumentException(
+                    "Unsupported method call '${ctx.text}'"
+                )
+
+            return MethodCallExprNode(
+                receiver = receiver,
+                name = segment.pathIdentSegment().text,
+                args = buildCallArguments(callArguments),
+                span = span,
+            )
+        }
+
+        val identifier = ctx.identifier()
+            ?: throw IllegalArgumentException(
+                "Unsupported field access '${ctx.text}'"
+            )
+
+        return FieldExprNode(
+            receiver = receiver,
+            name = identifier.text,
+            span = span,
+        )
+    }
+
+    private fun buildCallArguments(
+        ctx: RxParser.CallArgumentsContext
+    ): List<ExprNode> {
+        val arguments = mutableListOf<ExprNode>()
+
+        for (expressionContext in ctx.expression()) {
+            val argument = visit(expressionContext) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported argument '${expressionContext.text}'"
+                )
+
+            arguments.add(argument)
+        }
+
+        return arguments
+    }
+
+    // ===== unary + cast（4d） =====
+
+    private fun buildUnaryExpression(ctx: ParserRuleContext): AstNode {
+        if (ctx.childCount == 1) {
+            return buildPassThroughExpression(ctx)
+        }
+
+        val operatorContext = ctx.getChild(0)
+        val operandContext = ctx.getChild(1)
+
+        if (operatorContext !is RxParser.UnaryOperatorContext ||
+            operandContext !is ParserRuleContext
+        ) {
+            throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+        }
+
+        val operand = visit(operandContext) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+
+        return buildUnaryOperatorExpression(operatorContext, operand, spanOf(ctx))
+    }
+
+    private fun buildUnaryOperatorExpression(
+        ctx: RxParser.UnaryOperatorContext,
+        operand: ExprNode,
+        span: Span,
+    ): ExprNode {
+        if (ctx.MINUS() != null) {
+            return UnaryExprNode(UnOp.NEG, operand, span)
+        }
+
+        if (ctx.NOT() != null) {
+            return UnaryExprNode(UnOp.NOT, operand, span)
+        }
+
+        if (ctx.STAR() != null) {
+            return UnaryExprNode(UnOp.DEREF, operand, span)
+        }
+
+        if (ctx.ANDAND() != null) {
+            // &&x 拆两层：外层不可变引用，MUT 旗子属于内层
+            val inner = ReferenceExprNode(
+                mutable = ctx.MUT() != null,
+                operand = operand,
+                span = span,
+            )
+            return ReferenceExprNode(mutable = false, operand = inner, span = span)
+        }
+
+        if (ctx.AMP() != null) {
+            return ReferenceExprNode(
+                mutable = ctx.MUT() != null,
+                operand = operand,
+                span = span,
+            )
+        }
+
+        throw IllegalArgumentException(
+            "Unsupported unary operator '${ctx.text}'"
+        )
+    }
+
+    /**
+     * castExpression : unaryExpression (AS typeRef)* | castExpression AS closedCastType。
+     * 结构式折叠：第一个子规则是操作数，之后每个子规则都是一次 as 的目标类型。
+     */
+    private fun buildCastExpression(ctx: ParserRuleContext): AstNode {
+        val parts = ctx.children.filterIsInstance<ParserRuleContext>()
+
+        val first = parts.firstOrNull()
+            ?: throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+
+        var accumulator = visit(first) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+
+        for (index in 1 until parts.size) {
+            val targetType = buildCastTarget(parts[index])
+            accumulator = CastExprNode(
+                expr = accumulator,
+                targetType = targetType,
+                span = spanFrom(accumulator.span, parts[index]),
+            )
+        }
+
+        return accumulator
+    }
+
+    private fun buildCastTarget(ctx: ParserRuleContext): TypeRefNode {
+        if (ctx is RxParser.TypeRefContext) {
+            return visit(ctx) as? TypeRefNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported cast target '${ctx.text}'"
+                )
+        }
+
+        if (ctx is RxParser.ClosedCastTypeContext) {
+            return buildClosedCastType(ctx)
+        }
+
+        throw IllegalArgumentException(
+            "Unsupported cast target '${ctx.text}'"
+        )
+    }
+
+    /**
+     * closedCastType 只出现在 closed 链里的 as 目标（`b as Vec<i32> < c` 场景）：
+     * (T) / () / &closedCastType / [T; N] / 带泛型实参的段（暂不支持）。
+     */
+    private fun buildClosedCastType(
+        ctx: RxParser.ClosedCastTypeContext
+    ): TypeRefNode {
+        if (ctx.typeRef() != null) {
+            return visit(ctx.typeRef()) as? TypeRefNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported cast target '${ctx.text}'"
+                )
+        }
+
+        if (ctx.LPAREN() != null) {
+            return UnitTypeNode(spanOf(ctx))
+        }
+
+        if (ctx.arrayType() != null) {
+            throw IllegalArgumentException(
+                "Array types are not supported yet"
+            )
+        }
+
+        if (ctx.AMP() != null || ctx.ANDAND() != null) {
+            val innerContext = ctx.closedCastType()
+                ?: throw IllegalArgumentException(
+                    "Unsupported cast target '${ctx.text}'"
+                )
+
+            return RefTypeNode(
+                mutable = ctx.MUT() != null,
+                inner = buildClosedCastType(innerContext),
+                span = spanOf(ctx),
+            )
+        }
+
+        if (ctx.genericArgs() != null) {
+            throw IllegalArgumentException(
+                "Generic type arguments are not supported yet"
+            )
+        }
+
+        throw IllegalArgumentException(
+            "Unsupported cast target '${ctx.text}'"
+        )
+    }
+
+    // ===== 二元梯子 + 赋值（4e） =====
+
+    /** 运算符文本 → BinOp；注意 >> 等由多个 token 拼成，按整段文本映射。 */
+    private val binaryOperators: Map<String, BinOp> = mapOf(
+        "+" to BinOp.ADD,
+        "-" to BinOp.SUB,
+        "*" to BinOp.MUL,
+        "/" to BinOp.DIV,
+        "%" to BinOp.MOD,
+        "<<" to BinOp.SHL,
+        ">>" to BinOp.SHR,
+        "&" to BinOp.BIT_AND,
+        "^" to BinOp.BIT_XOR,
+        "|" to BinOp.BIT_OR,
+        "==" to BinOp.EQ,
+        "!=" to BinOp.NE,
+        "<" to BinOp.LT,
+        "<=" to BinOp.LE,
+        ">" to BinOp.GT,
+        ">=" to BinOp.GE,
+        "&&" to BinOp.AND,
+        "||" to BinOp.OR,
+    )
+
+    private val assignmentOperators: Map<String, AssignOp> = mapOf(
+        "=" to AssignOp.ASSIGN,
+        "+=" to AssignOp.ADD_ASSIGN,
+        "-=" to AssignOp.SUB_ASSIGN,
+        "*=" to AssignOp.MUL_ASSIGN,
+        "/=" to AssignOp.DIV_ASSIGN,
+        "%=" to AssignOp.MOD_ASSIGN,
+        "&=" to AssignOp.BIT_AND_ASSIGN,
+        "|=" to AssignOp.BIT_OR_ASSIGN,
+        "^=" to AssignOp.BIT_XOR_ASSIGN,
+        "<<=" to AssignOp.SHL_ASSIGN,
+        ">>=" to AssignOp.SHR_ASSIGN,
+    )
+
+    /** 各家族共用的运算符辅助规则名（用于区分"运算符孩子"和"操作数孩子"）。 */
+    private val operatorHelperRules = setOf(
+        "additiveOperator",
+        "multiplicativeOperator",
+        "shiftRight",
+        "comparisonExceptLt",
+        "assignmentOperator",
+        "equalsSign",
+    )
+
+    /**
+     * 二元层通用折叠：按子节点顺序扫描——运算符待用、操作数结合（左结合）。
+     * 对开放/closed 两种顺序（(op 操作数)* vs (操作数 op)*）都成立。
+     */
+    private fun buildBinaryExpression(ctx: ParserRuleContext): AstNode {
+        var accumulator: ExprNode? = null
+        var pendingOperator: BinOp? = null
+
+        for (index in 0 until ctx.childCount) {
+            val child = ctx.getChild(index)
+
+            if (isOperatorChild(child)) {
+                if (pendingOperator != null) {
+                    throw IllegalArgumentException(
+                        "Unsupported expression '${ctx.text}'"
+                    )
+                }
+
+                pendingOperator = binaryOperators[child.text]
+                    ?: throw IllegalArgumentException(
+                        "Unsupported operator '${child.text}'"
+                    )
+                continue
+            }
+
+            if (child !is ParserRuleContext) {
+                throw IllegalArgumentException(
+                    "Unsupported expression '${ctx.text}'"
+                )
+            }
+
+            val operand = visit(child) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported expression '${ctx.text}'"
+                )
+
+            val left = accumulator
+
+            if (left == null) {
+                accumulator = operand
+            } else {
+                val operator = pendingOperator
+                    ?: throw IllegalArgumentException(
+                        "Unsupported expression '${ctx.text}'"
+                    )
+
+                accumulator = BinaryExprNode(
+                    op = operator,
+                    left = left,
+                    right = operand,
+                    span = spanOf(left, operand),
+                )
+                pendingOperator = null
+            }
+        }
+
+        return accumulator ?: throw IllegalArgumentException(
+            "Unsupported expression '${ctx.text}'"
+        )
+    }
+
+    private fun isOperatorChild(child: ParseTree): Boolean {
+        if (child is TerminalNode) {
+            // 二元层里直接出现的终结符只有运算符（&& || << < 等）
+            return true
+        }
+
+        if (child is ParserRuleContext) {
+            return RxParser.ruleNames[child.ruleIndex] in operatorHelperRules
+        }
+
+        return false
+    }
+
+    /**
+     * assignmentExpression : logicalOrExpression (assignmentOperator expression)?
+     * 右结合由文法递归保证（右侧走完整 expression），这里只折叠一次。
+     */
+    private fun buildAssignmentExpression(ctx: ParserRuleContext): AstNode {
+        if (ctx.childCount == 1) {
+            return buildPassThroughExpression(ctx)
+        }
+
+        if (ctx.childCount != 3) {
+            throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+        }
+
+        val targetContext = ctx.getChild(0)
+        val operatorContext = ctx.getChild(1)
+        val valueContext = ctx.getChild(2)
+
+        if (targetContext !is ParserRuleContext ||
+            operatorContext !is RxParser.AssignmentOperatorContext ||
+            valueContext !is ParserRuleContext
+        ) {
+            throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+        }
+
+        val target = visit(targetContext) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+
+        val value = visit(valueContext) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "Unsupported expression '${ctx.text}'"
+            )
+
+        val operator = assignmentOperators[operatorContext.text]
+            ?: throw IllegalArgumentException(
+                "Unsupported assignment operator '${operatorContext.text}'"
+            )
+
+        return AssignExprNode(
+            op = operator,
+            target = target,
+            value = value,
+            span = spanOf(target, value),
+        )
+    }
+
+    // ===== span 组合工具 =====
+
+    /** 从已有节点的起点到 CST 节点的终点（后缀/包一层的情形）。 */
+    private fun spanFrom(start: Span, ctx: ParserRuleContext): Span {
+        val stop = ctx.stop ?: ctx.start
+
+        return Span(
+            startLine = start.startLine,
+            startColumn = start.startColumn,
+            endLine = stop.line,
+            endColumn = stop.charPositionInLine + (stop.text?.length ?: 0),
+        )
+    }
+
+    /** 两个 AST 节点拼起来的范围（二元/赋值折叠）。 */
+    private fun spanOf(start: AstNode, stop: AstNode): Span {
+        return Span(
+            startLine = start.span.startLine,
+            startColumn = start.span.startColumn,
+            endLine = stop.span.endLine,
+            endColumn = stop.span.endColumn,
         )
     }
 
