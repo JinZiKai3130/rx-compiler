@@ -501,9 +501,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         if (ctx.pathInExpression() != null) {
             // pathInExpression (LBRACE ...)? —— 带花括号的是结构体字面量
             if (ctx.LBRACE() != null) {
-                throw IllegalArgumentException(
-                    "Struct literals are not supported yet"
-                )
+                return buildStructLiteral(ctx)
             }
             return buildPathExpression(ctx.pathInExpression())
         }
@@ -513,9 +511,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         }
 
         if (ctx.arrayExpression() != null) {
-            throw IllegalArgumentException(
-                "Array literals are not supported yet"
-            )
+            return buildArrayExpression(ctx.arrayExpression())
         }
 
         if (ctx.BREAK() != null) {
@@ -568,9 +564,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         }
 
         if (ctx.arrayExpression() != null) {
-            throw IllegalArgumentException(
-                "Array literals are not supported yet"
-            )
+            return buildArrayExpression(ctx.arrayExpression())
         }
 
         if (ctx.BREAK() != null) {
@@ -725,6 +719,182 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
             segments = segments,
             span = spanOf(ctx),
         )
+    }
+
+    // ===== 数组字面量（二刀-D） =====
+
+    /**
+     * arrayExpression : LBRACKET (expression (SEMI constValue | (COMMA expression)* COMMA?))? RBRACKET。
+     * 三种形态：[]、[a, b,]、[elem; N]；重复形里 elements 留空（元素与长度都进 repeat）。
+     * expression 是列表访问器：(0) 是首个表达式——重复形里即元素，列表形里是全部元素。
+     */
+    private fun buildArrayExpression(
+        ctx: RxParser.ArrayExpressionContext
+    ): ArrayLitNode {
+        val expressionContexts = ctx.expression()
+
+        if (expressionContexts.isEmpty()) {
+            return ArrayLitNode(
+                elements = emptyList(),
+                repeat = null,
+                span = spanOf(ctx),
+            )
+        }
+
+        if (ctx.SEMI() != null) {
+            val element = visit(expressionContexts[0]) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported array repeat element '${ctx.text}'"
+                )
+
+            val lengthContext = ctx.constValue()
+                ?: throw IllegalArgumentException(
+                    "Unsupported array length '${ctx.text}'"
+                )
+
+            return ArrayLitNode(
+                elements = emptyList(),
+                repeat = ArrayRepeat(
+                    element = element,
+                    length = buildConstValue(lengthContext),
+                ),
+                span = spanOf(ctx),
+            )
+        }
+
+        val elements = mutableListOf<ExprNode>()
+
+        for (expressionContext in expressionContexts) {
+            val element = visit(expressionContext) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported array element '${expressionContext.text}'"
+                )
+
+            elements.add(element)
+        }
+
+        return ArrayLitNode(
+            elements = elements,
+            repeat = null,
+            span = spanOf(ctx),
+        )
+    }
+
+    /** constValue : INTEGER_LITERAL | TRUE | FALSE | pathInExpression | MINUS magnitude | LPAREN constValue RPAREN。 */
+    private fun buildConstValue(
+        ctx: RxParser.ConstValueContext
+    ): ExprNode {
+        if (ctx.INTEGER_LITERAL() != null) {
+            return IntLitNode(
+                value = parseIntegerLiteral(ctx.INTEGER_LITERAL().text),
+                span = spanOf(ctx),
+            )
+        }
+
+        if (ctx.TRUE() != null) {
+            return BoolLitNode(value = true, span = spanOf(ctx))
+        }
+
+        if (ctx.FALSE() != null) {
+            return BoolLitNode(value = false, span = spanOf(ctx))
+        }
+
+        val pathContext = ctx.pathInExpression()
+        if (pathContext != null) {
+            return buildPathExpression(pathContext)
+        }
+
+        if (ctx.MINUS() != null) {
+            val magnitudeContext = ctx.magnitude()
+                ?: throw IllegalArgumentException(
+                    "Unsupported const value '${ctx.text}'"
+                )
+
+            return UnaryExprNode(
+                op = UnOp.NEG,
+                operand = buildMagnitude(magnitudeContext),
+                span = spanOf(ctx),
+            )
+        }
+
+        val innerContext = ctx.constValue()
+        if (innerContext != null) {
+            // (constValue)：拆括号返回内层
+            return buildConstValue(innerContext)
+        }
+
+        throw IllegalArgumentException(
+            "Unsupported const value '${ctx.text}'"
+        )
+    }
+
+    /** magnitude : INTEGER_LITERAL | pathInExpression | LPAREN magnitude RPAREN。 */
+    private fun buildMagnitude(
+        ctx: RxParser.MagnitudeContext
+    ): ExprNode {
+        if (ctx.INTEGER_LITERAL() != null) {
+            return IntLitNode(
+                value = parseIntegerLiteral(ctx.INTEGER_LITERAL().text),
+                span = spanOf(ctx),
+            )
+        }
+
+        val pathContext = ctx.pathInExpression()
+        if (pathContext != null) {
+            return buildPathExpression(pathContext)
+        }
+
+        val innerContext = ctx.magnitude()
+        if (innerContext != null) {
+            // (magnitude)：拆括号返回内层
+            return buildMagnitude(innerContext)
+        }
+
+        throw IllegalArgumentException(
+            "Unsupported magnitude '${ctx.text}'"
+        )
+    }
+
+    // ===== 结构体字面量（二刀-C） =====
+
+    /**
+     * 结构体字面量来自 nonBlockPrimary 的 `pathInExpression (LBRACE structExprFields? RBRACE)?`
+     * 分支（条件族没有这个备选：`if S { a: 1 } {}` 会被文法直接拒绝）。
+     * path 复用 buildPathExpression（顺带保留泛型实参的 fail-fast），只取段名。
+     */
+    private fun buildStructLiteral(
+        ctx: RxParser.NonBlockPrimaryContext
+    ): StructLitNode {
+        val pathNode = buildPathExpression(ctx.pathInExpression())
+
+        val fields = mutableListOf<StructLitField>()
+        val fieldsContext = ctx.structExprFields()
+
+        if (fieldsContext != null) {
+            for (fieldContext in fieldsContext.structExprField()) {
+                fields.add(buildStructExprField(fieldContext))
+            }
+        }
+
+        return StructLitNode(
+            path = pathNode.segments.map { it.name },
+            fields = fields,
+            span = spanOf(ctx),
+        )
+    }
+
+    /** structExprField : identifier COLON expression。 */
+    private fun buildStructExprField(
+        ctx: RxParser.StructExprFieldContext
+    ): StructLitField {
+        val name = ctx.identifier().text
+
+        val value = visit(ctx.expression()) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "Struct field '$name' has an unsupported value"
+            )
+
+        return StructLitField(name = name, value = value)
     }
 
     // ===== postfix 层（4c）：调用 / 下标 / 字段 / 方法 =====
