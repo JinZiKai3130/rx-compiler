@@ -259,21 +259,20 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         ctx: RxParser.ExpressionWithBlockContext
     ): ExprNode {
         if (ctx.LOOP() != null) {
-            throw IllegalArgumentException(
-                "Loop expressions are not supported yet"
-            )
+            return buildLoopExpression(ctx.blockExpression(), spanOf(ctx))
         }
 
         if (ctx.WHILE() != null) {
-            throw IllegalArgumentException(
-                "While expressions are not supported yet"
+            return buildWhileExpression(
+                ctx.conditionExpression(),
+                ctx.blockExpression(),
+                spanOf(ctx),
             )
         }
 
-        if (ctx.ifExpression() != null) {
-            throw IllegalArgumentException(
-                "If expressions are not supported yet"
-            )
+        val ifContext = ctx.ifExpression()
+        if (ifContext != null) {
+            return buildIfExpression(ifContext)
         }
 
         val blockContext = ctx.blockExpression()
@@ -285,6 +284,85 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
             ?: throw IllegalArgumentException(
                 "Unsupported block expression '${blockContext.text}'"
             )
+    }
+
+    // ===== 块状表达式（if / loop / while） =====
+
+    /**
+     * ifExpression : IF conditionExpression blockExpression
+     *                (ELSE (blockExpression | ifExpression))?。
+     * blockExpression 在规则里出现两次，生成的是列表访问器：
+     * blockExpression(0) 是 then 块；else 块才是 blockExpression(1)。
+     */
+    private fun buildIfExpression(
+        ctx: RxParser.IfExpressionContext
+    ): IfExprNode {
+        val condition = visit(ctx.conditionExpression()) as? ExprNode
+            ?: throw IllegalArgumentException(
+                "If expression '${ctx.text}' has an unsupported condition"
+            )
+
+        val thenBlock = visit(ctx.blockExpression(0)) as? BlockExprNode
+            ?: throw IllegalArgumentException(
+                "If expression '${ctx.text}' has an unsupported then block"
+            )
+
+        val innerIfContext = ctx.ifExpression()
+        val elseBranch: ExprNode? = when {
+            ctx.ELSE() == null -> null
+            // else if 链：递归展开，每一层用自己的 ifExpression 上下文
+            innerIfContext != null -> buildIfExpression(innerIfContext)
+            else -> visit(ctx.blockExpression(1)) as? BlockExprNode
+                ?: throw IllegalArgumentException(
+                    "If expression '${ctx.text}' has an unsupported else block"
+                )
+        }
+
+        return IfExprNode(
+            condition = condition,
+            thenblock = thenBlock,
+            elseBranch = elseBranch,
+            span = spanOf(ctx),
+        )
+    }
+
+    /** LOOP blockExpression（语句与条件两处入口共用）。 */
+    private fun buildLoopExpression(
+        blockContext: RxParser.BlockExpressionContext?,
+        span: Span,
+    ): LoopExprNode {
+        val block = blockContext?.let { visit(it) as? BlockExprNode }
+            ?: throw IllegalArgumentException(
+                "Loop expression has an unsupported body"
+            )
+
+        return LoopExprNode(
+            block = block,
+            span = span,
+        )
+    }
+
+    /** WHILE conditionExpression blockExpression（同上，两处入口共用）。 */
+    private fun buildWhileExpression(
+        conditionContext: RxParser.ConditionExpressionContext?,
+        blockContext: RxParser.BlockExpressionContext?,
+        span: Span,
+    ): WhileExprNode {
+        val condition = conditionContext?.let { visit(it) as? ExprNode }
+            ?: throw IllegalArgumentException(
+                "While expression has an unsupported condition"
+            )
+
+        val block = blockContext?.let { visit(it) as? BlockExprNode }
+            ?: throw IllegalArgumentException(
+                "While expression has an unsupported body"
+            )
+
+        return WhileExprNode(
+            block = block,
+            condition = condition,
+            span = span,
+        )
     }
 
     override fun visitLetStatement(
@@ -478,21 +556,20 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
             return buildParenthesizedExpression(ctx.expression(), ctx)
         }
 
-        if (ctx.ifExpression() != null) {
-            throw IllegalArgumentException(
-                "If expressions are not supported yet"
-            )
+        val ifContext = ctx.ifExpression()
+        if (ifContext != null) {
+            return buildIfExpression(ifContext)
         }
 
         if (ctx.LOOP() != null) {
-            throw IllegalArgumentException(
-                "Loop expressions are not supported yet"
-            )
+            return buildLoopExpression(ctx.blockExpression(), spanOf(ctx))
         }
 
         if (ctx.WHILE() != null) {
-            throw IllegalArgumentException(
-                "While expressions are not supported yet"
+            return buildWhileExpression(
+                ctx.conditionExpression(),
+                ctx.blockExpression(),
+                spanOf(ctx),
             )
         }
 
