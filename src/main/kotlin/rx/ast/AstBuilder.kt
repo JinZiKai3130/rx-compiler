@@ -519,21 +519,15 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         }
 
         if (ctx.BREAK() != null) {
-            throw IllegalArgumentException(
-                "Break expressions are not supported yet"
-            )
+            return buildBreakExpression(ctx.expression(), spanOf(ctx))
         }
 
         if (ctx.RETURN() != null) {
-            throw IllegalArgumentException(
-                "Return expressions are not supported yet"
-            )
+            return buildReturnExpression(ctx.expression(), spanOf(ctx))
         }
 
         if (ctx.CONTINUE() != null) {
-            throw IllegalArgumentException(
-                "Continue expressions are not supported yet"
-            )
+            return ContinueExprNode(spanOf(ctx))
         }
 
         throw IllegalArgumentException(
@@ -580,26 +574,56 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         }
 
         if (ctx.BREAK() != null) {
-            throw IllegalArgumentException(
-                "Break expressions are not supported yet"
-            )
+            return buildBreakExpression(ctx.conditionBreakExpression(), spanOf(ctx))
         }
 
         if (ctx.RETURN() != null) {
-            throw IllegalArgumentException(
-                "Return expressions are not supported yet"
-            )
+            return buildReturnExpression(ctx.conditionExpression(), spanOf(ctx))
         }
 
         if (ctx.CONTINUE() != null) {
-            throw IllegalArgumentException(
-                "Continue expressions are not supported yet"
-            )
+            return ContinueExprNode(spanOf(ctx))
         }
 
         throw IllegalArgumentException(
             "Unsupported primary expression '${ctx.text}'"
         )
+    }
+
+    // ===== break / return / continue =====
+
+    /** BREAK expression?（普通/语句族）与 BREAK conditionBreakExpression?（条件族）共用。 */
+    private fun buildBreakExpression(
+        payloadContext: ParserRuleContext?,
+        span: Span,
+    ): BreakExprNode {
+        val value = if (payloadContext == null) {
+            null
+        } else {
+            visit(payloadContext) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Break expression has an unsupported operand"
+                )
+        }
+
+        return BreakExprNode(value = value, span = span)
+    }
+
+    /** RETURN expression?（普通/语句族）与 RETURN conditionExpression?（条件族）共用。 */
+    private fun buildReturnExpression(
+        payloadContext: ParserRuleContext?,
+        span: Span,
+    ): ReturnExprNode {
+        val value = if (payloadContext == null) {
+            null
+        } else {
+            visit(payloadContext) as? ExprNode
+                ?: throw IllegalArgumentException(
+                    "Return expression has an unsupported operand"
+                )
+        }
+
+        return ReturnExprNode(value = value, span = span)
     }
 
     /** 括号表达式：(e) 拆括号返回内层；() 是单元字面量。 */
