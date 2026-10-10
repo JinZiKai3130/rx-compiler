@@ -93,10 +93,10 @@ class CallExprNode(
     override fun accept(visitor: AstVisitor) = visitor.visit(this)
 }
 
-/** 方法调用：x.m(a) */
+/** 方法调用：x.m(a)、x.m::<T>(a)（泛型实参挂在方法段上） */
 class MethodCallExprNode(
     val receiver: ExprNode,
-    val name: String,
+    val name: PathSegment,
     val args: List<ExprNode>,
     span: Span,
 ) : ExprNode(span) {

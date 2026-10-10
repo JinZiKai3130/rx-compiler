@@ -48,6 +48,8 @@ class FnNode(
     val params: List<Param>,
     val returnType: TypeRefNode?,  // 没写 -> T 时为 null
     val body: BlockExprNode,
+    // 泛型形参按要求丢弃，只留“出现过”（main 的语义检查：不得有泛型形参）
+    val hasGenericParams: Boolean = false,
     span: Span,
 ) : ItemNode(span) {
     override fun accept(visitor: AstVisitor) = visitor.visit(this)

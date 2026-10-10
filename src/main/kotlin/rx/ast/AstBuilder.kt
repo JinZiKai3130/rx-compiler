@@ -11,6 +11,11 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
     override fun visitCrate(ctx: RxParser.CrateContext): CrateNode {
         val items = mutableListOf<ItemNode>()
         for (itemContext in ctx.item()) {
+            // use 声明按规范整条丢弃：不做导入解析，也不建树
+            if (itemContext.useDeclaration() != null) {
+                continue
+            }
+
             val visitedNode = visit(itemContext)
             val itemNode = visitedNode as? ItemNode
 
@@ -30,17 +35,9 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
     ): FnNode {
         val functionName = ctx.identifier().text
 
-        if (ctx.genericParams() != null) {
-            throw IllegalArgumentException(
-                "Function '$functionName' has generic parameters, which are not supported yet"
-            )
-        }
-
-        if (ctx.whereClause() != null) {
-            throw IllegalArgumentException(
-                "Function '$functionName' has a where clause, which is not supported yet"
-            )
-        }
+        // 泛型形参（文法上只可能是生命周期）与 where 子句按规范跳过丢弃；
+        // 只记录“出现过”，留给 main 的语义检查（不得有泛型形参）。
+        val hasGenericParams = ctx.genericParams() != null
 
         val parameters = mutableListOf<Param>()
         val parameterContext = ctx.functionParameters()
@@ -85,6 +82,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
             params = parameters,
             returnType = returnType,
             body = blockBody,
+            hasGenericParams = hasGenericParams,
             span = spanOf(ctx),
         )
     }
@@ -117,6 +115,109 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         )
     }
 
+    // ===== 其余顶层声明：struct / const / impl（三刀） =====
+
+    /**
+     * structDefinition : outerAttribute* STRUCT identifier genericParams? whereClause?
+     *                    LBRACE (structField (COMMA structField)* COMMA?)? RBRACE。
+     * 泛型形参/where 子句按规范丢弃（文法上只可能是生命周期）。
+     */
+    override fun visitStructDefinition(
+        ctx: RxParser.StructDefinitionContext
+    ): StructNode {
+        val name = ctx.identifier().text
+
+        val derives = mutableListOf<Derive>()
+        for (attributeContext in ctx.outerAttribute()) {
+            for (deriveNameContext in attributeContext.deriveName()) {
+                derives.add(parseDeriveName(deriveNameContext))
+            }
+        }
+
+        val fields = mutableListOf<StructField>()
+        for (fieldContext in ctx.structField()) {
+            val fieldType = visit(fieldContext.typeRef()) as? TypeRefNode
+                ?: throw IllegalArgumentException(
+                    "Struct field '${fieldContext.identifier().text}' has an unsupported type"
+                )
+
+            fields.add(
+                StructField(
+                    name = fieldContext.identifier().text,
+                    type = fieldType,
+                )
+            )
+        }
+
+        return StructNode(
+            name = name,
+            derives = derives,
+            fields = fields,
+            span = spanOf(ctx),
+        )
+    }
+
+    /** deriveName : COPY | CLONE | PARTIAL_EQ | EQ。 */
+    private fun parseDeriveName(
+        ctx: RxParser.DeriveNameContext
+    ): Derive = when (ctx.text) {
+        "Copy" -> Derive.COPY
+        "Clone" -> Derive.CLONE
+        "PartialEq" -> Derive.PARTIAL_EQ
+        "Eq" -> Derive.EQ
+        else -> throw IllegalArgumentException(
+            "Unsupported derive '${ctx.text}'"
+        )
+    }
+
+    /** constantItem : CONST identifier COLON typeRef equalsSign constValue SEMI。 */
+    override fun visitConstantItem(
+        ctx: RxParser.ConstantItemContext
+    ): ConstNode {
+        val name = ctx.identifier().text
+
+        val declaredType = visit(ctx.typeRef()) as? TypeRefNode
+            ?: throw IllegalArgumentException(
+                "Constant '$name' has an unsupported type"
+            )
+
+        return ConstNode(
+            name = name,
+            type = declaredType,
+            value = buildConstValue(ctx.constValue()),
+            span = spanOf(ctx),
+        )
+    }
+
+    /**
+     * inherentImpl : IMPL genericParams? typeRef whereClause? LBRACE associatedItem* RBRACE。
+     * associatedItem 只可能是 fn 或 const（文法约束）。
+     */
+    override fun visitInherentImpl(
+        ctx: RxParser.InherentImplContext
+    ): ImplNode {
+        val target = visit(ctx.typeRef()) as? TypeRefNode
+            ?: throw IllegalArgumentException(
+                "Impl has an unsupported target type '${ctx.text}'"
+            )
+
+        val items = mutableListOf<ItemNode>()
+        for (associatedContext in ctx.associatedItem()) {
+            val item = visit(associatedContext) as? ItemNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported associated item '${associatedContext.text}'"
+                )
+
+            items.add(item)
+        }
+
+        return ImplNode(
+            target = target,
+            items = items,
+            span = spanOf(ctx),
+        )
+    }
+
     override fun visitTypeRef(
         ctx: RxParser.TypeRefContext
     ): TypeRefNode {
@@ -129,9 +230,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         }
 
         if (ctx.arrayType() != null) {
-            throw IllegalArgumentException(
-                "Array types are not supported yet"
-            )
+            return buildArrayType(ctx.arrayType())
         }
 
         if (ctx.LPAREN() != null && ctx.typeRef() == null) {
@@ -153,18 +252,72 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         val segments = mutableListOf<PathSegment>()
 
         for (segmentContext in ctx.typePathSegment()) {
-            if (segmentContext.genericArgs() != null) {
-                throw IllegalArgumentException(
-                    "Generic type arguments are not supported yet"
+            segments.add(
+                buildPathSegment(
+                    segmentContext.pathIdentSegment(),
+                    segmentContext.genericArgs(),
                 )
-            }
-
-            val segmentName = segmentContext.pathIdentSegment().text
-            segments.add(PathSegment(name = segmentName))
+            )
         }
 
         return PathTypeNode(
             segments = segments,
+            span = spanOf(ctx),
+        )
+    }
+
+    /**
+     * genericArgs : LT (genericArg (COMMA genericArg)* COMMA?)? genericClose。
+     * genericArg : lifetime | typeRef —— 生命周期实参按规范丢弃，只收类型实参。
+     */
+    private fun buildGenericArgs(
+        ctx: RxParser.GenericArgsContext
+    ): List<TypeRefNode> {
+        val arguments = mutableListOf<TypeRefNode>()
+
+        for (argumentContext in ctx.genericArg()) {
+            val typeContext = argumentContext.typeRef() ?: continue
+
+            val type = visit(typeContext) as? TypeRefNode
+                ?: throw IllegalArgumentException(
+                    "Unsupported generic argument '${argumentContext.text}'"
+                )
+
+            arguments.add(type)
+        }
+
+        return arguments
+    }
+
+    /** 段名 + 可选泛型实参（`Item<T>` / `Item::<T>` 两种写法的公共形状）。 */
+    private fun buildPathSegment(
+        identContext: RxParser.PathIdentSegmentContext,
+        genericArgsContext: RxParser.GenericArgsContext?,
+    ): PathSegment {
+        val arguments = if (genericArgsContext == null) {
+            emptyList()
+        } else {
+            buildGenericArgs(genericArgsContext)
+        }
+
+        return PathSegment(
+            name = identContext.text,
+            genericArgs = arguments,
+        )
+    }
+
+    /** arrayType : LBRACKET typeRef SEMI constValue RBRACKET。 */
+    private fun buildArrayType(
+        ctx: RxParser.ArrayTypeContext
+    ): ArrayTypeNode {
+        val elementType = visit(ctx.typeRef()) as? TypeRefNode
+            ?: throw IllegalArgumentException(
+                "Array type '${ctx.text}' has an unsupported element type"
+            )
+
+        return ArrayTypeNode(
+            element = elementType,
+            length = buildConstValue(ctx.constValue()),
             span = spanOf(ctx),
         )
     }
@@ -177,6 +330,21 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         if (innerType == null) {
             throw IllegalArgumentException(
                 "Reference type '${ctx.text}' has an unsupported inner type"
+            )
+        }
+
+        if (ctx.ANDAND() != null) {
+            // &&T = &(&T)：拆两层的规则与表达式侧一致——外层不可变，MUT 属于内层
+            val inner = RefTypeNode(
+                mutable = ctx.MUT() != null,
+                inner = innerType,
+                span = spanOf(ctx),
+            )
+
+            return RefTypeNode(
+                mutable = false,
+                inner = inner,
+                span = spanOf(ctx),
             )
         }
 
@@ -705,14 +873,12 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         val segments = mutableListOf<PathSegment>()
 
         for (segmentContext in ctx.pathExprSegment()) {
-            if (segmentContext.genericArgs() != null) {
-                throw IllegalArgumentException(
-                    "Generic path arguments are not supported yet"
+            segments.add(
+                buildPathSegment(
+                    segmentContext.pathIdentSegment(),
+                    segmentContext.genericArgs(),
                 )
-            }
-
-            val segmentName = segmentContext.pathIdentSegment().text
-            segments.add(PathSegment(name = segmentName))
+            )
         }
 
         return PathExprNode(
@@ -977,13 +1143,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         val span = spanFrom(receiver.span, ctx)
 
         if (segment != null) {
-            // 方法调用：DOT pathExprSegment callArguments
-            if (segment.genericArgs() != null) {
-                throw IllegalArgumentException(
-                    "Generic method arguments are not supported yet"
-                )
-            }
-
+            // 方法调用：DOT pathExprSegment callArguments（段上可能挂 ::<T>）
             val callArguments = ctx.callArguments()
                 ?: throw IllegalArgumentException(
                     "Unsupported method call '${ctx.text}'"
@@ -991,7 +1151,10 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
 
             return MethodCallExprNode(
                 receiver = receiver,
-                name = segment.pathIdentSegment().text,
+                name = buildPathSegment(
+                    segment.pathIdentSegment(),
+                    segment.genericArgs(),
+                ),
                 args = buildCallArguments(callArguments),
                 span = span,
             )
@@ -1140,7 +1303,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
 
     /**
      * closedCastType 只出现在 closed 链里的 as 目标（`b as Vec<i32> < c` 场景）：
-     * (T) / () / &closedCastType / [T; N] / 带泛型实参的段（暂不支持）。
+     * (T) / () / &closedCastType / [T; N] / 带泛型实参的路径段。
      */
     private fun buildClosedCastType(
         ctx: RxParser.ClosedCastTypeContext
@@ -1157,9 +1320,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         }
 
         if (ctx.arrayType() != null) {
-            throw IllegalArgumentException(
-                "Array types are not supported yet"
-            )
+            return buildArrayType(ctx.arrayType())
         }
 
         if (ctx.AMP() != null || ctx.ANDAND() != null) {
@@ -1168,16 +1329,54 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
                     "Unsupported cast target '${ctx.text}'"
                 )
 
+            val innerType = buildClosedCastType(innerContext)
+
+            if (ctx.ANDAND() != null) {
+                // &&T 拆两层的规则与 referenceType 相同
+                val inner = RefTypeNode(
+                    mutable = ctx.MUT() != null,
+                    inner = innerType,
+                    span = spanOf(ctx),
+                )
+
+                return RefTypeNode(
+                    mutable = false,
+                    inner = inner,
+                    span = spanOf(ctx),
+                )
+            }
+
             return RefTypeNode(
                 mutable = ctx.MUT() != null,
-                inner = buildClosedCastType(innerContext),
+                inner = innerType,
                 span = spanOf(ctx),
             )
         }
 
         if (ctx.genericArgs() != null) {
-            throw IllegalArgumentException(
-                "Generic type arguments are not supported yet"
+            // (typePathSegment PATHSEP)* pathIdentSegment PATHSEP? genericArgs：
+            // 前面每段整段收下，最后一段带上闭合用的泛型实参
+            val segments = mutableListOf<PathSegment>()
+
+            for (segmentContext in ctx.typePathSegment()) {
+                segments.add(
+                    buildPathSegment(
+                        segmentContext.pathIdentSegment(),
+                        segmentContext.genericArgs(),
+                    )
+                )
+            }
+
+            segments.add(
+                buildPathSegment(
+                    ctx.pathIdentSegment(),
+                    ctx.genericArgs(),
+                )
+            )
+
+            return PathTypeNode(
+                segments = segments,
+                span = spanOf(ctx),
             )
         }
 
