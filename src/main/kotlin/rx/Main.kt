@@ -3,16 +3,19 @@ package rx
 import org.antlr.v4.runtime.Token
 import rx.ast.AstBuilder
 import rx.ast.AstPrinter
+import rx.ast.CrateNode
 import rx.frontend.ENTRY_RULES
 import rx.frontend.ParserDriver
 import rx.frontend.SyntaxDiagnostic
 import rx.gen.RxLexer
 import rx.gen.RxParser
+import rx.semantic.SemanticAnalyzer
+import rx.semantic.SemanticError
 import java.io.IOException
 import kotlin.system.exitProcess
 
 private const val USAGE =
-    "usage: rxc [--stage lex|parse] [--entry crate|item|expression|letStatement|typeRef]\n" +
+    "usage: rxc [--stage lex|parse|semantic] [--entry crate|item|expression|letStatement|typeRef]\n" +
         "           [--dump-cst] [--dump-ast] [--tokens] <file.rx>"
 
 /**
@@ -20,7 +23,7 @@ private const val USAGE =
  *
  * Exit codes:
  *   0 = accepted (with --dump-ast: the AST was also built successfully)
- *   1 = lexing / parsing errors
+ *   1 = lexing / parsing / semantic errors
  *   2 = usage / I/O error
  *   3 = parsed cleanly, but the AST builder does not support the construct yet
  */
@@ -60,9 +63,10 @@ fun main(args: Array<String>) {
         index++
     }
 
-    if (stage != "lex" && stage != "parse") usageError()
+    if (stage != "lex" && stage != "parse" && stage != "semantic") usageError()
     if (entry !in ENTRY_RULES) usageError()
     if (stage == "lex" && (dumpAst || dumpCst)) usageError()
+    if (stage == "semantic" && entry != "crate") usageError()
     if (files.size != 1) usageError()
 
     val file = files[0]
@@ -89,7 +93,7 @@ fun main(args: Array<String>) {
     if (dumpCst) println(result.tree.toStringTree(result.parser))
     if (result.diagnostics.isNotEmpty()) report(file, result.diagnostics)
 
-    if (dumpAst) {
+    if (dumpAst || stage == "semantic") {
         val root = try {
             AstBuilder().visit(result.tree)
         } catch (e: RuntimeException) {
@@ -97,17 +101,32 @@ fun main(args: Array<String>) {
             exitProcess(3)
         }
 
-        if (root == null) {
-            // use 声明按规范整条丢弃、不建树：这是预期行为，不算失败。
-            val item = result.tree as? RxParser.ItemContext
-            if (item != null && item.useDeclaration() != null) {
-                println("(use declaration discarded: no AST node)")
+        if (dumpAst) {
+            if (root == null) {
+                // use 声明按规范整条丢弃、不建树：这是预期行为，不算失败。
+                val item = result.tree as? RxParser.ItemContext
+                if (item != null && item.useDeclaration() != null) {
+                    println("(use declaration discarded: no AST node)")
+                } else {
+                    System.err.println("$file: error: [ast] builder produced no node for entry '$entry'")
+                    exitProcess(3)
+                }
             } else {
-                System.err.println("$file: error: [ast] builder produced no node for entry '$entry'")
+                print(AstPrinter().print(root))
+            }
+        }
+
+        if (stage == "semantic") {
+            if (root !is CrateNode) {
+                System.err.println("$file: error: [ast] semantic stage expects a crate node")
                 exitProcess(3)
             }
-        } else {
-            print(AstPrinter().print(root))
+            try {
+                SemanticAnalyzer().analyze(root)
+            } catch (e: SemanticError) {
+                System.err.println(e.render(file))
+                exitProcess(1)
+            }
         }
     }
 }
