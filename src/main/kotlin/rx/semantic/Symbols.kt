@@ -45,3 +45,14 @@ class LocalSymbol(
     val mutable: Boolean,
     val span: Span?,
 ) : Symbol
+
+// 包含i32、Box等等
+class BuiltinTypeSymbol(
+    override val name: String,
+) : Symbol
+
+// 包括print_i32等
+class BuiltinFunctionSymbol(
+    override val name: String,
+) : Symbol
+

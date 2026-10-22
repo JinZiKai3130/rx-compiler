@@ -4,5 +4,13 @@
             "approve": true,
             "matchCommandLine": true
         }
-    }
+    },
+    "java.import.exclusions": [
+        "**/build",
+        "**/build/**",
+        "**/.gradle/**"
+    ],
+    "java.diagnostic.filter": [
+        "**/build/**"
+    ]
 }

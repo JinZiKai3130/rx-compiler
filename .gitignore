@@ -15,4 +15,9 @@ dev/
 *.local.*
 .venv/
 
+# Gradle is used for the IDE-only project model (see build.gradle.kts)
+/.gradle/
+/.kotlin/
+/build/gradle-ide/
+
 build
