@@ -47,8 +47,13 @@ class LocalSymbol(
 ) : Symbol
 
 // 包含i32、Box等等
+enum class BuiltinTypeKind {
+    I32, U32, ISIZE, USIZE, BOOL, BOX, VEC,
+}
+
 class BuiltinTypeSymbol(
     override val name: String,
+    val kind: BuiltinTypeKind,
 ) : Symbol
 
 // 包括print_i32等

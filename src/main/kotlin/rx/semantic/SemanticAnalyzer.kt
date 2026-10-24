@@ -43,6 +43,8 @@ import rx.ast.IntLitNode
 import rx.ast.BoolLitNode
 import rx.ast.UnitLitNode
 
+import rx.ast.PathSegment
+
 /**
  * 语义分析器（2.5）总入口：对整棵 AST 查名字、查类型（semantic_design.md）。
  *
@@ -170,11 +172,21 @@ class SemanticAnalyzer {
             }
 
             is MethodCallExprNode -> {
+                if (expr.name.genericArgs.isNotEmpty()) {
+                    throw SemanticError(
+                        expr.span,
+                        "method segments have no type parameters",
+                    )
+                }
+
                 checkExpr(expr.receiver)
                 for (arg in expr.args) checkExpr(arg)
             }
 
-            is CastExprNode -> checkExpr(expr.expr)
+            is CastExprNode -> {
+                checkExpr(expr.expr)
+                checkTypeRef(expr.targetType)
+            }
             is BreakExprNode -> expr.value?.let { checkExpr(it) }
             is ReturnExprNode -> expr.value?.let { checkExpr(it) }
 
@@ -196,39 +208,116 @@ class SemanticAnalyzer {
     }
 
     private fun checkPathExpr(node: PathExprNode) {
-        val first = node.segments.firstOrNull() 
+        val first = node.segments.firstOrNull()
             ?: throw SemanticError(node.span, "empty path")
 
-        // 解析Path上的泛型
+        if (node.segments.size == 1) {
+            checkSingleSegmentValuePath(node, first)
+            return
+        }
+
+        checkMultiSegmentPath(node)
+    }
+
+    private fun checkSingleSegmentValuePath(
+        node: PathExprNode,
+        segment: PathSegment,
+    ) {
+        val name = segment.name
+
+        if (name == "self") {
+            if (!currentHasSelfParam) {
+                throw SemanticError(node.span, "`self` is only allowed inside a method")
+            }
+            if (segment.genericArgs.isNotEmpty()) {
+                throw SemanticError(node.span, "`self` takes no type arguments")
+            }
+            return
+        }
+
+        currentScope.lookupValue(name)
+            ?: throw SemanticError(node.span, "unresolved value '$name'")
+
+        if (segment.genericArgs.isNotEmpty()) {
+            throw SemanticError(
+                node.span,
+                "functions and values have no type parameters",
+            )
+        }
+    }
+
+    private fun checkMultiSegmentPath(node: PathExprNode) {
+        val first = node.segments.first()
+
+        if (first.name == "Self") {
+            if (currentSelfType == null) {
+                throw SemanticError(node.span, "`Self` is not allowed here")
+            }
+            if (first.genericArgs.isNotEmpty()) {
+                throw SemanticError(node.span, "`Self` takes no type arguments")
+            }
+        } else {
+            val symbol = currentScope.lookupType(first.name)
+                ?: throw SemanticError(
+                    node.span,
+                    "unresolved path '${first.name}'",
+                )
+
+            when (symbol) {
+                is BuiltinTypeSymbol -> when (symbol.kind) {
+                    BuiltinTypeKind.BOX,
+                    BuiltinTypeKind.VEC -> {
+                        // 表达式位置：Box::new / Vec::new 缺少类型实参是 UB，
+                        // 规范不要求报错；但多于一个一定是错误。
+                        if (first.genericArgs.size > 1) {
+                            throw SemanticError(
+                                node.span,
+                                "'${first.name}' takes at most one type argument here",
+                            )
+                        }
+                    }
+
+                    else -> {
+                        if (first.genericArgs.isNotEmpty()) {
+                            throw SemanticError(
+                                node.span,
+                                "primitive type '${first.name}' takes no type arguments",
+                            )
+                        }
+                    }
+                }
+
+                is StructSymbol -> {
+                    if (first.genericArgs.isNotEmpty()) {
+                        throw SemanticError(
+                            node.span,
+                            "struct '${first.name}' has no type parameters",
+                        )
+                    }
+                }
+
+                else -> throw SemanticError(
+                    node.span,
+                    "unresolved path '${first.name}'",
+                )
+            }
+        }
+
+        // 第二段及以后：关联函数/常量/方法都没有类型参数
+        for (segment in node.segments.drop(1)) {
+            if (segment.genericArgs.isNotEmpty()) {
+                throw SemanticError(
+                    node.span,
+                    "associated items have no type parameters",
+                )
+            }
+        }
+
+        // 泛型实参里的类型名仍然要递归检查
         for (segment in node.segments) {
             for (arg in segment.genericArgs) {
                 checkTypeRef(arg)
             }
-        }
-
-        if (node.segments.size == 1) {
-            val name = first.name
-
-            if (name == "self") {
-                if (!currentHasSelfParam) {
-                    throw SemanticError(node.span, "`self` is only allowed inside a method")
-                }
-                return
-            }
-
-            currentScope.lookupValue(name)
-                ?: throw SemanticError(node.span, "unresolved value '$name'")
-            return
-        }
-
-        val head = first.name
-
-        if (head == "Self") {
-            if (currentSelfType == null) {
-                throw SemanticError(node.span, "`Self` is not allowed here")
-            }
-        } else if (currentScope.lookupType(head) == null) {
-            throw SemanticError(node.span, "unresolved path '$head'")
         }
     }
 
@@ -273,9 +362,19 @@ class SemanticAnalyzer {
         }
     }
 
+    private val BUILTIN_TYPES = mapOf(
+        "i32"   to BuiltinTypeKind.I32,
+        "u32"   to BuiltinTypeKind.U32,
+        "isize" to BuiltinTypeKind.ISIZE,
+        "usize" to BuiltinTypeKind.USIZE,
+        "bool"  to BuiltinTypeKind.BOOL,
+        "Box"   to BuiltinTypeKind.BOX,
+        "Vec"   to BuiltinTypeKind.VEC,
+    )
+
     private fun installBuiltins(scope: Scope) {
-        for (name in BUILTIN_TYPE_NAMES) {
-            scope.declareType(BuiltinTypeSymbol(name))
+        for ((name, kind) in BUILTIN_TYPES) {
+            scope.declareType(BuiltinTypeSymbol(name, kind))
         }
         for (name in BUILTIN_VALUE_NAMES) {
             scope.declareValue(BuiltinFunctionSymbol(name))
@@ -326,7 +425,7 @@ class SemanticAnalyzer {
                     checkFunctionBody(item)
                 }
                 is ConstNode  -> { /* 暂不检查 */ }
-                is ImplNode   -> { /* 下一步处理 */ }
+                is ImplNode   -> checkImpl(item)
                 is UseNode    -> {}
             }
         }
@@ -387,8 +486,9 @@ class SemanticAnalyzer {
     }
 
     private fun checkPathType(ref: PathTypeNode) {
-        val name = ref.segments.firstOrNull()?.name
+        val segment = ref.segments.firstOrNull()
             ?: throw SemanticError(ref.span, "empty type path")
+        val name = segment.name
 
         if (name == "Self") {
             if (currentSelfType == null) {
@@ -397,14 +497,82 @@ class SemanticAnalyzer {
                     "`Self` is only allowed inside a struct or impl",
                 )
             }
-        } else if (globals.lookupType(name) == null) {
-            throw SemanticError(ref.span, "unresolved type '$name'")
+            if (segment.genericArgs.isNotEmpty()) {
+                throw SemanticError(ref.span, "`Self` takes no type arguments")
+            }
+            return
         }
 
-        for (segment in ref.segments) {
-            for (arg in segment.genericArgs) {
-                checkTypeRef(arg)
+        val symbol = globals.lookupType(name)
+            ?: throw SemanticError(ref.span, "unresolved type '$name'")
+
+
+        when (symbol) {
+            is BuiltinTypeSymbol -> when (symbol.kind) {
+                BuiltinTypeKind.BOX,
+                BuiltinTypeKind.VEC -> { // 对于BOX或者VEC来说，只能接受一个泛型参数
+                    if (segment.genericArgs.size != 1) {
+                        throw SemanticError(
+                            ref.span,
+                            "'$name' requires exactly one concrete type argument",
+                        )
+                    }
+                }
+                else -> {
+                    if (segment.genericArgs.isNotEmpty()) {
+                        throw SemanticError(
+                            ref.span,
+                            "primitive type '$name' takes no type arguments",
+                        )
+                    }
+                }
             }
+
+            is StructSymbol -> {
+                if (segment.genericArgs.isNotEmpty()) {
+                    throw SemanticError(
+                        ref.span,
+                        "struct '$name' has no type parameters",
+                    )
+                }
+            }
+
+            else -> throw SemanticError(ref.span, "unresolved type '$name'")
         }
+
+
+        for (arg in segment.genericArgs) {
+            checkTypeRef(arg)
+        }
+    }
+
+    
+
+    private fun checkImpl(node: ImplNode) {
+        val target = node.target
+
+        // &S、[i32; 2]、() 等直接拒绝
+        if (target !is PathTypeNode) {
+            throw SemanticError(
+                target.span,
+                "impl target must be a user-defined struct",
+            )
+        }
+        // 这里只留下合法的structTypeNode
+        // 先检查类型名和泛型实参
+        checkTypeRef(target)
+
+        val name = target.segments.firstOrNull()?.name
+            ?: throw SemanticError(target.span, "empty impl target")
+
+        val symbol = globals.lookupType(name)
+        if (symbol !is StructSymbol) {
+            throw SemanticError(
+                target.span,
+                "impl target must be a user-defined struct",
+            )
+        }
+
+        // 可选：这里设置 currentSelfType，收集 associated items
     }
 }
