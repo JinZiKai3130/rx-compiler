@@ -24,6 +24,11 @@ class Scope(val parent: Scope?) {
         return true
     }
 
+    /** 局部绑定：允许同层遮蔽（let 语义）。 */
+    fun defineLocal(symbol: Symbol) {
+        values[symbol.name] = symbol
+    }
+
     /** 在当前层声明一个类型名字空间的符号；本层已存在同名符号时返回 false。 */
     fun declareType(symbol: Symbol): Boolean {
         if (types.containsKey(symbol.name)) return false
