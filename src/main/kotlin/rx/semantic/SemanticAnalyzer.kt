@@ -536,6 +536,11 @@ class SemanticAnalyzer {
     private fun checkTypeRef(ref: TypeRefNode) { resolveType(ref) }
 
     private fun resolvePathType(ref: PathTypeNode): Type {
+        // 类型位置只能写单个类型名；关联项只有常量/函数，没有关联类型。
+        if (ref.segments.size > 1) {
+            throw SemanticError(ref.span, "qualified type paths cannot name a type")
+        }
+
         val segment = ref.segments.firstOrNull()
             ?: throw SemanticError(ref.span, "empty type path")
         val name = segment.name
@@ -623,6 +628,7 @@ class SemanticAnalyzer {
                 is ConstNode -> ConstantSymbol(
                     name = item.name,
                     node = item,
+                    owner = symbol,
                 )
 
                 else -> null
