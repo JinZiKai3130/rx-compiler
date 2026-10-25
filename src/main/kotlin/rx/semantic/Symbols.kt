@@ -20,7 +20,10 @@ sealed interface Symbol {
 class StructSymbol(
     override val name: String,
     val node: StructNode,
-) : Symbol
+) : Symbol {
+    /** 方法和关联常量共享一个关联值名字空间，多个 impl 块共用这张表。 */
+    val associatedValues: MutableMap<String, Symbol> = LinkedHashMap()
+}
 
 /**
  * 函数或方法（值名字空间）。

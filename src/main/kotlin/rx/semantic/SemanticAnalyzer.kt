@@ -72,9 +72,9 @@ class SemanticAnalyzer {
     /** 当前是否在带 self 参数的方法里；顶层函数为 false。 */
     private var currentHasSelfParam: Boolean = false
 
-    private val BUILTIN_TYPE_NAMES = listOf(
-        "i32", "u32", "isize", "usize", "bool", "Box", "Vec",
-    )
+    // private val BUILTIN_TYPE_NAMES = listOf(
+    //     "i32", "u32", "isize", "usize", "bool", "Box", "Vec",
+    // )
 
     private val BUILTIN_VALUE_NAMES = listOf(
         "get_i32", "print_i32", "println_i32",
@@ -386,6 +386,7 @@ class SemanticAnalyzer {
         installBuiltins(globals)
 
         collectTopLevel(crate.items)
+        checkEntry(crate)
         checkDeclarations(crate.items)
         // WP2+: 逐函数体检查（globals 的生命周期随本次分析）
     }
@@ -413,6 +414,38 @@ class SemanticAnalyzer {
             }
             is ImplNode   -> { /* 这一小步先什么都不做 */ }
             is UseNode    -> { /* 理论上不会出现，忽略 */ }
+        }
+    }
+
+    private fun checkEntry(crate: CrateNode) {
+        val main = crate.items
+            .filterIsInstance<FnNode>()
+            .firstOrNull { it.name == "main" }
+            ?: throw SemanticError(
+                crate.span,
+                "an executable needs a top-level `main` function",
+            )
+
+        if (main.params.isNotEmpty()) {
+            throw SemanticError(
+                main.span,
+                "`main` cannot have parameters",
+            )
+        }
+
+        if (main.hasGenericParams) {
+            throw SemanticError(
+                main.span,
+                "`main` cannot have generic parameters",
+            )
+        }
+
+        val returnType = main.returnType
+        if (returnType != null && returnType !is UnitTypeNode) {
+            throw SemanticError(
+                main.span,
+                "`main` must return `()`",
+            )
         }
     }
 
@@ -573,6 +606,31 @@ class SemanticAnalyzer {
             )
         }
 
+        for (item in node.items) {
+            val associated = when (item) {
+                is FnNode -> FunctionSymbol(
+                    name = item.name,
+                    node = item,
+                    receiver = node.target,
+                )
+
+                is ConstNode -> ConstantSymbol(
+                    name = item.name,
+                    node = item,
+                )
+
+                else -> null
+            } ?: continue
+
+            if (symbol.associatedValues.containsKey(associated.name)) {
+                throw SemanticError(
+                    item.span,
+                    "duplicate associated item '${associated.name}'",
+                )
+            }
+
+            symbol.associatedValues[associated.name] = associated
+        }
         // 可选：这里设置 currentSelfType，收集 associated items
     }
 }
