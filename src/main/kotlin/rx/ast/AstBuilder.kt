@@ -807,8 +807,10 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         ctx: RxParser.LiteralExpressionContext
     ): ExprNode {
         if (ctx.INTEGER_LITERAL() != null) {
+            val literal = parseIntegerLiteral(ctx.INTEGER_LITERAL().text)
             return IntLitNode(
-                value = parseIntegerLiteral(ctx.INTEGER_LITERAL().text),
+                value = literal.value,
+                suffix = literal.suffix,
                 span = spanOf(ctx),
             )
         }
@@ -826,13 +828,17 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         )
     }
 
-    /** 十进制/0b/0o/0x（允许下划线分隔），可选后缀 i32/u32/isize/usize；先按 Long 存值。 */
-    private fun parseIntegerLiteral(text: String): Long {
-        var body = text
+    private data class ParsedInteger(val value: Long, val suffix: String?)
 
-        for (suffix in listOf("isize", "usize", "i32", "u32")) {
-            if (body.endsWith(suffix)) {
-                body = body.dropLast(suffix.length)
+    /** 十进制/0b/0o/0x（允许下划线分隔），可选后缀 i32/u32/isize/usize；先按 Long 存值。 */
+    private fun parseIntegerLiteral(text: String): ParsedInteger{
+        var body = text
+        var suffix: String? = null
+
+        for (candidate in listOf("isize", "usize", "i32", "u32")) {
+            if (body.endsWith(candidate)) {
+                body = body.dropLast(candidate.length)
+                suffix = candidate
                 break
             }
         }
@@ -861,10 +867,10 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
             }
         }
 
-        return digits.toLongOrNull(radix)
-            ?: throw IllegalArgumentException(
-                "Integer literal '$text' is out of range"
-            )
+        val value = digits.toLongOrNull(radix)
+        ?: throw IllegalArgumentException("Integer literal '$text' is out of range")
+
+        return ParsedInteger(value, suffix)
     }
 
     private fun buildPathExpression(
@@ -951,8 +957,10 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         ctx: RxParser.ConstValueContext
     ): ExprNode {
         if (ctx.INTEGER_LITERAL() != null) {
+            val literal = parseIntegerLiteral(ctx.INTEGER_LITERAL().text)
             return IntLitNode(
-                value = parseIntegerLiteral(ctx.INTEGER_LITERAL().text),
+                value = literal.value,
+                suffix = literal.suffix,
                 span = spanOf(ctx),
             )
         }
@@ -999,8 +1007,10 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
         ctx: RxParser.MagnitudeContext
     ): ExprNode {
         if (ctx.INTEGER_LITERAL() != null) {
+            val literal = parseIntegerLiteral(ctx.INTEGER_LITERAL().text)
             return IntLitNode(
-                value = parseIntegerLiteral(ctx.INTEGER_LITERAL().text),
+                value = literal.value,
+                suffix = literal.suffix,
                 span = spanOf(ctx),
             )
         }

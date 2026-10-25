@@ -45,6 +45,19 @@ import rx.ast.UnitLitNode
 
 import rx.ast.PathSegment
 
+import rx.ast.Type
+import rx.ast.UnitType
+import rx.ast.BoolType
+import rx.ast.I32Type
+import rx.ast.U32Type
+import rx.ast.IsizeType
+import rx.ast.UsizeType
+import rx.ast.RefType
+import rx.ast.ArrayType
+import rx.ast.BoxType
+import rx.ast.VecType
+import rx.ast.StructType
+
 /**
  * 语义分析器（2.5）总入口：对整棵 AST 查名字、查类型（semantic_design.md）。
  *
@@ -508,78 +521,71 @@ class SemanticAnalyzer {
     }
 
     // 这里检查参数是否是正常的Type
-    private fun checkTypeRef(ref: TypeRefNode) {
-        when (ref) {
-            is UnitTypeNode -> Unit
-            is RefTypeNode -> checkTypeRef(ref.inner)
-            is ArrayTypeNode -> checkTypeRef(ref.element)  // 长度留到 WP5
-            is PathTypeNode -> checkPathType(ref)
-            else -> throw SemanticError(ref.span, "unsupported type reference")
-        }
+    fun resolveType(ref: TypeRefNode): Type = when (ref) {
+        is UnitTypeNode  -> UnitType
+        is RefTypeNode   -> RefType(ref.mutable, resolveType(ref.inner))
+        is ArrayTypeNode -> ArrayType(
+            resolveType(ref.element),
+            0L,   // 这里还没做，溜了TODO
+        )
+        is PathTypeNode  -> resolvePathType(ref)
+        else -> throw SemanticError(ref.span, "unsupported type reference")
     }
 
-    private fun checkPathType(ref: PathTypeNode) {
+    // 兼容旧调用点：只关心校验的地方不用改
+    private fun checkTypeRef(ref: TypeRefNode) { resolveType(ref) }
+
+    private fun resolvePathType(ref: PathTypeNode): Type {
         val segment = ref.segments.firstOrNull()
             ?: throw SemanticError(ref.span, "empty type path")
         val name = segment.name
 
         if (name == "Self") {
-            if (currentSelfType == null) {
-                throw SemanticError(
-                    ref.span,
-                    "`Self` is only allowed inside a struct or impl",
-                )
-            }
-            if (segment.genericArgs.isNotEmpty()) {
+            val self = currentSelfType
+                ?: throw SemanticError(ref.span, "`Self` is only allowed inside a struct or impl")
+            if (segment.genericArgs.isNotEmpty())
                 throw SemanticError(ref.span, "`Self` takes no type arguments")
-            }
-            return
+            return StructType(self.name, self.node)
         }
 
         val symbol = globals.lookupType(name)
             ?: throw SemanticError(ref.span, "unresolved type '$name'")
 
-
-        when (symbol) {
+        return when (symbol) {
             is BuiltinTypeSymbol -> when (symbol.kind) {
-                BuiltinTypeKind.BOX,
-                BuiltinTypeKind.VEC -> { // 对于BOX或者VEC来说，只能接受一个泛型参数
-                    if (segment.genericArgs.size != 1) {
-                        throw SemanticError(
-                            ref.span,
-                            "'$name' requires exactly one concrete type argument",
-                        )
-                    }
+                BuiltinTypeKind.BOX, BuiltinTypeKind.VEC -> {
+                    if (segment.genericArgs.size != 1)
+                        throw SemanticError(ref.span, "'$name' requires exactly one concrete type argument")
+                    val element = resolveType(segment.genericArgs[0])   // 递归 + 校验
+                    if (symbol.kind == BuiltinTypeKind.BOX) BoxType(element) else VecType(element)
                 }
-                else -> {
-                    if (segment.genericArgs.isNotEmpty()) {
-                        throw SemanticError(
-                            ref.span,
-                            "primitive type '$name' takes no type arguments",
-                        )
-                    }
-                }
+                BuiltinTypeKind.I32   -> { requireNoArgs(ref, name, segment); I32Type }
+                BuiltinTypeKind.U32   -> { requireNoArgs(ref, name, segment); U32Type }
+                BuiltinTypeKind.ISIZE -> { requireNoArgs(ref, name, segment); IsizeType }
+                BuiltinTypeKind.USIZE -> { requireNoArgs(ref, name, segment); UsizeType }
+                BuiltinTypeKind.BOOL  -> { requireNoArgs(ref, name, segment); BoolType }
             }
 
             is StructSymbol -> {
-                if (segment.genericArgs.isNotEmpty()) {
-                    throw SemanticError(
-                        ref.span,
-                        "struct '$name' has no type parameters",
-                    )
-                }
+                if (segment.genericArgs.isNotEmpty())
+                    throw SemanticError(ref.span, "struct '$name' has no type parameters")
+                StructType(name, symbol.node)
             }
 
             else -> throw SemanticError(ref.span, "unresolved type '$name'")
         }
-
-
-        for (arg in segment.genericArgs) {
-            checkTypeRef(arg)
-        }
     }
 
-    
+    /** 原生类型不能带泛型实参。 */
+    private fun requireNoArgs(
+        ref: PathTypeNode,
+        name: String,
+        segment: PathSegment,
+    ) {
+        if (segment.genericArgs.isNotEmpty()) {
+            throw SemanticError(ref.span, "primitive type '$name' takes no type arguments")
+        }
+    }
 
     private fun checkImpl(node: ImplNode) {
         val target = node.target

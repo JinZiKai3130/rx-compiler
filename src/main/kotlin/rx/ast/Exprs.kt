@@ -12,6 +12,7 @@ class BlockExprNode(
 /** 整数字面量：123（先按 Long 存值，范围检查交给语义阶段） */
 class IntLitNode(
     val value: Long,
+    val suffix: String? = null,   // "i32" / "u32" / "isize" / "usize"；null = 无后缀
     span: Span,
 ) : ExprNode(span) {
     override fun accept(visitor: AstVisitor) = visitor.visit(this)

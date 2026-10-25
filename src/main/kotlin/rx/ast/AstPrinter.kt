@@ -132,7 +132,7 @@ class AstPrinter : AstVisitor {
     }
 
     override fun visit(n: IntLitNode) {
-        nodeLine(n, "IntLitNode(value = ${n.value})")
+        nodeLine(n, "IntLitNode(value = ${n.value}, suffix = ${n.suffix})")
     }
 
     override fun visit(n: BoolLitNode) {
@@ -292,7 +292,7 @@ class AstPrinter : AstVisitor {
 
     /** 数组类型长度、const 值等"常量叶子"的一行式描述（文法上只有整数/布尔/路径/负号）。 */
     private fun describeConst(expr: ExprNode): String = when (expr) {
-        is IntLitNode -> expr.value.toString()
+        is IntLitNode -> "${expr.value}${expr.suffix ?: ""}"
         is BoolLitNode -> expr.value.toString()
         is PathExprNode -> expr.segments.joinToString("::") { it.name }
         is UnaryExprNode -> if (expr.op == UnOp.NEG) "-${describeConst(expr.operand)}" else "?"
