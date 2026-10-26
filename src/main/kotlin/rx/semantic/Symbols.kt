@@ -24,6 +24,13 @@ class StructSymbol(
     val fields: MutableMap<String, Type> = LinkedHashMap()
 }
 
+/** 解析后的函数签名（类型都已翻译成内部 Type）。 */
+data class FunctionSignature(
+    val paramTypes: List<Type>,   // 不含 self
+    val returnType: Type,         // 没写 `-> T` 就是 UnitType
+    val selfParam: SelfParam?,    // null = 普通函数 / 关联函数
+)
+
 /**
  * 函数或方法（值名字空间）。
  * [receiver] 非空 = `impl` 块里的方法/关联函数，存 impl 的目标类型写法；
@@ -33,7 +40,11 @@ class FunctionSymbol(
     override val name: String,
     val node: FnNode,
     val receiver: TypeRefNode? = null,
-) : Symbol
+    val owner: StructSymbol? = null,
+) : Symbol {
+    /** 阶段 6 填充。 */
+    var signature: FunctionSignature? = null
+}
 
 /** 常量（值名字空间）：顶层 `const`；impl 里的关联常量（WP1 接线时再补 owner）。 */
 class ConstantSymbol(
@@ -62,5 +73,7 @@ class BuiltinTypeSymbol(
 // 包括print_i32等
 class BuiltinFunctionSymbol(
     override val name: String,
+    val paramTypes: List<Type>,
+    val returnType: Type,
 ) : Symbol
 
