@@ -1,10 +1,6 @@
 package rx.semantic
 
-import rx.ast.ConstNode
-import rx.ast.FnNode
-import rx.ast.Span
-import rx.ast.StructNode
-import rx.ast.TypeRefNode
+import rx.ast.*
 
 /**
  * 符号：名字解析的产物，存进 [Scope] 的两个名字空间（类型 / 值）。
@@ -23,6 +19,9 @@ class StructSymbol(
 ) : Symbol {
     /** 方法和关联常量共享一个关联值名字空间，多个 impl 块共用这张表。 */
     val associatedValues: MutableMap<String, Symbol> = LinkedHashMap()
+
+    /** 字段名 → 内部类型；LinkedHashMap 保持声明顺序（布局要用）。 */
+    val fields: MutableMap<String, Type> = LinkedHashMap()
 }
 
 /**

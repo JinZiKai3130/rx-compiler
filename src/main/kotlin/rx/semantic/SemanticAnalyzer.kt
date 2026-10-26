@@ -347,6 +347,7 @@ class SemanticAnalyzer {
         registerImpls(crate.items)
         checkEntry(crate)
         constEval.evaluateAll(crate)
+        resolveStructFields(crate.items)
         checkDeclarations(crate.items)
     }
 
@@ -409,6 +410,29 @@ class SemanticAnalyzer {
                 main.span,
                 "`main` must return `()`",
             )
+        }
+    }
+
+    /** 阶段 5：把每个 struct 的字段类型解析成内部 Type。 */
+    private fun resolveStructFields(items: List<ItemNode>) {
+        for (item in items) {
+            if (item !is StructNode) continue
+            val symbol = globals.lookupType(item.name) as? StructSymbol ?: continue
+
+            val savedSelf = currentSelfType // 记录在此之前应该挂载的地方
+            currentSelfType = symbol          // ← 关键：字段里可以写 Self / Vec<Self>
+            try {
+                symbol.fields.clear()
+                for (field in item.fields) {
+                    if (symbol.fields.containsKey(field.name)) {
+                        throw SemanticError(field.type.span, "duplicate field '${field.name}'")
+                    }
+                    // 标记为我们所认识的type
+                    symbol.fields[field.name] = resolveType(field.type)
+                }
+            } finally {
+                currentSelfType = savedSelf
+            }
         }
     }
 

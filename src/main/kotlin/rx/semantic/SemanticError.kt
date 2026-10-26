@@ -1,6 +1,6 @@
 package rx.semantic
 
-import rx.ast.Span
+import rx.ast.*
 
 /**
  * 语义错误（2.5）：由 [SemanticAnalyzer] 抛出，CLI 捕获后按统一格式报告并退出码 1。
