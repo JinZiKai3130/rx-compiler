@@ -1,62 +1,5 @@
 package rx.semantic
-
-import rx.ast.CrateNode
-import rx.ast.ConstNode
-import rx.ast.FnNode
-import rx.ast.FnParam
-import rx.ast.ImplNode
-import rx.ast.ItemNode
-import rx.ast.StructNode
-import rx.ast.UseNode
-
-import rx.ast.ArrayTypeNode
-import rx.ast.PathTypeNode
-import rx.ast.RefTypeNode
-import rx.ast.SelfParam
-import rx.ast.TypeRefNode
-import rx.ast.UnitTypeNode
-
-import rx.ast.StmtNode
-import rx.ast.LetNode
-import rx.ast.ExprNode
-import rx.ast.ExprStmtNode
-import rx.ast.BlockExprNode
-import rx.ast.PathExprNode
-import rx.ast.CallExprNode
-import rx.ast.StructLitNode
-import rx.ast.IfExprNode
-import rx.ast.WhileExprNode
-import rx.ast.LoopExprNode
-import rx.ast.UnaryExprNode
-import rx.ast.ArrayLitNode
-import rx.ast.ReferenceExprNode
-import rx.ast.BinaryExprNode
-import rx.ast.AssignExprNode
-import rx.ast.FieldExprNode
-import rx.ast.IndexExprNode
-import rx.ast.MethodCallExprNode
-import rx.ast.CastExprNode
-import rx.ast.BreakExprNode
-import rx.ast.ContinueExprNode
-import rx.ast.ReturnExprNode
-import rx.ast.IntLitNode
-import rx.ast.BoolLitNode
-import rx.ast.UnitLitNode
-
-import rx.ast.PathSegment
-
-import rx.ast.Type
-import rx.ast.UnitType
-import rx.ast.BoolType
-import rx.ast.I32Type
-import rx.ast.U32Type
-import rx.ast.IsizeType
-import rx.ast.UsizeType
-import rx.ast.RefType
-import rx.ast.ArrayType
-import rx.ast.BoxType
-import rx.ast.VecType
-import rx.ast.StructType
+import rx.ast.*
 
 /**
  * 语义分析器（2.5）总入口：对整棵 AST 查名字、查类型（semantic_design.md）。
@@ -92,6 +35,8 @@ class SemanticAnalyzer {
     private val BUILTIN_VALUE_NAMES = listOf(
         "get_i32", "print_i32", "println_i32",
     )
+
+    private val constEval: ConstEval by lazy { ConstEval(globals, ::resolveType) }
 
     /* 检查顶层函数体 */
     private fun checkFunctionBody(node: FnNode) {
@@ -207,7 +152,7 @@ class SemanticAnalyzer {
                 for (element in expr.elements) checkExpr(element)
                 expr.repeat?.let {
                     checkExpr(it.element)
-                    checkExpr(it.length)
+                    constEval.requireUsize(it.length)
                 }
             }
 
@@ -399,9 +344,14 @@ class SemanticAnalyzer {
         installBuiltins(globals)
 
         collectTopLevel(crate.items)
+        registerImpls(crate.items)
         checkEntry(crate)
+        constEval.evaluateAll(crate)
         checkDeclarations(crate.items)
-        // WP2+: 逐函数体检查（globals 的生命周期随本次分析）
+    }
+
+    private fun registerImpls(items: List<ItemNode>) {
+        for (item in items) if (item is ImplNode) checkImpl(item)
     }
 
     private fun collectTopLevel(items: List<ItemNode>) {
@@ -470,8 +420,6 @@ class SemanticAnalyzer {
                     checkTopLevelFunction(item)
                     checkFunctionBody(item)
                 }
-                is ConstNode  -> { /* 暂不检查 */ }
-                is ImplNode   -> checkImpl(item)
                 is UseNode    -> {}
             }
         }
@@ -526,7 +474,7 @@ class SemanticAnalyzer {
         is RefTypeNode   -> RefType(ref.mutable, resolveType(ref.inner))
         is ArrayTypeNode -> ArrayType(
             resolveType(ref.element),
-            0L,   // 这里还没做，溜了TODO
+            constEval.requireUsize(ref.length),
         )
         is PathTypeNode  -> resolvePathType(ref)
         else -> throw SemanticError(ref.span, "unsupported type reference")
