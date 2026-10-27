@@ -13,7 +13,8 @@
 - 词法/语法/AST 已全部完成（三刀已 commit，HEAD 与 origin/main 同步）。
 - 实测：`tests/official/semantic/` 全部 **236 条源码 236/236 能 parse 且建树成功**（无 exit 3 缺口）。
 - 语义检查为空 → 当前"前端通过即接受"，即基线 **69/236**（167 个 reject 全被误收）。
-- AST 已预留接口：`ExprNode.type`（内部类型槽位）、`rx/ast/Type.kt`（现有 `i32/bool/()/!` 占位）、`AstVisitor`（`AstPrinter` 为先例，语义分析同样以实现 visitor 的方式接入）。
+- AST 已预留接口：`ExprNode.type`（内部类型槽位）、`rx/ast/Type.kt`（现有 `i32/bool/()/!` 占位）。
+  `rx.ast.AstVisitor` 目前只有 `AstPrinter` 一个实现；语义检查**不使用** visitor，每个阶段手写递归（原因见 §2.4）。
 
 ```
 source → [lex] → [parse] → [build AST] → [semantic] → 接受(exit 0) / 拒绝(exit 1)
@@ -39,12 +40,19 @@ source → [lex] → [parse] → [build AST] → [semantic] → 接受(exit 0) /
 
 ```
 src/main/kotlin/rx/semantic/
-  SemanticAnalyzer.kt   主遍历（实现 rx.ast.AstVisitor）
-  Scope.kt              作用域链 + 两张符号表
-  Symbols.kt            符号种类（结构体/函数/常量/局部/参数/字段/关联项/内建）
-  SemanticError.kt      诊断与异常
-  ConstEval.kt          常量求值（WP5：数组长度、repeat、const 初值、循环检测）
-  ...（类型规则助手按 WP 增补）
+  SemanticAnalyzer.kt   总入口：按固定顺序调用各阶段（不含检查逻辑）
+  SemanticContext.kt    共享上下文：全局作用域、当前 Self/作用域/self 参数、resolveType
+  Builtins.kt           内建环境：原生类型、Box/Vec、I/O 函数
+  CrateIndex.kt         阶段 1：声明收集（struct/fn/const → 全局作用域）
+  ImplRegistry.kt       阶段 2：结构体身份 + impl 关联项登记
+  EntryChecker.kt       阶段 3：main 契约
+  ConstEval.kt          阶段 4：常量求值（const 初值 / 数组长度 / repeat + 环检测）
+  StructResolver.kt     阶段 5：结构体字段类型
+  FunctionResolver.kt   阶段 6：函数与方法签名
+  GlobalConstraints.kt  阶段 7：递归布局有限大小 + derive 合法性/能力
+  BodyChecker.kt        阶段 8：函数体——作用域、语句、块
+  ExprChecker.kt        阶段 8：表达式检查（类型检查后续接入）
+  Scope.kt / Symbols.kt / SemanticError.kt   基础设施
 ```
 
 内部类型沿用并扩展 `rx/ast/Type.kt`（`AstNode.type` 的既有槽位指向它）。
@@ -72,7 +80,8 @@ src/main/kotlin/rx/semantic/
 
 ### 2.4 检查器
 
-- `SemanticAnalyzer` 实现 `AstVisitor`，持有"当前作用域 + 当前函数上下文（返回类型、循环栈）"。
+- 每个阶段是一个独立 pass，只遍历自己关心的子树（阶段 1 不进函数体、阶段 5 只看字段、阶段 6 只看签名、阶段 8 才走完所有表达式）。**不使用** `rx.ast.AstVisitor`：`visit(n)` 没有返回值，装不下"表达式 → 类型"；而且各阶段的遍历范围、顺序、同一子树的重入次数都不同。
+- `BodyChecker` / `ExprChecker` 持有"当前作用域 + 当前函数上下文（返回类型、循环栈）"。
 - 表达式检查采用 `check(expr, expected: Type?) -> Type`：**期望类型**是硬需求——字面量选型顺序 = 后缀 > 期望 > i32 兜底；if/loop/break/数组元素/赋值 RHS 都要它。
 - `never` 类型参与合并：`return / break / continue` 以及 diverge 的块；if 无 else = `()`；while = `()`；loop 值 = break 载荷合并。
 - **place（可赋值地点）分析**：`= / 复合赋值 / &mut / 可变方法接收者` 需要 place + 可变性链（绑定 mut → 引用 mut → 字段/索引逐层）。

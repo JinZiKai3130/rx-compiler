@@ -3,25 +3,62 @@ package rx.semantic
 import rx.ast.*
 
 /**
- * 阶段 8：函数体检查（BodyChecker）。
+ * 阶段 8（一）：函数体骨架。
  *
- * 目前只做名字解析：作用域进出、未定义名、`self` 的可用性、路径的泛型实参规则。
- * 表达式类型检查（`check(expr, expected): Type`）、place/可变性、方法查找后续接入。
+ * 只管"语句层"：函数体作用域、参数绑定、块作用域进出、`let` 的声明。
+ * 表达式的一切判定（名字解析、可调用性，将来的类型 / place）在 [ExprChecker]。
+ *
+ * 块本身也是表达式（[BlockExprNode]），所以 [ExprChecker] 会回调 [checkBlock]：
+ * 语句层管作用域，表达式层管值，两边互相持有引用是刻意的。
+ *
+ * 待接入（批次 A/C）：
+ * - 记录 `currentReturnType`，供 `return` 检查；
+ * - 维护 `loopStack`（`LoopContext { kind, breakTypes }`），供 break/continue 与 loop 定型。
  */
 class BodyChecker(private val ctx: SemanticContext) {
 
+    private val exprs = ExprChecker(ctx, this)
+
     fun check(items: List<ItemNode>) {
         for (item in items) {
-            if (item is FnNode) checkFunctionBody(item)
+            when (item) {
+                is FnNode -> checkFunctionBody(item, owner = null)
+
+                is ImplNode -> {
+                    val owner = implOwner(item)
+                    for (member in item.items) {
+                        if (member is FnNode) checkFunctionBody(member, owner)
+                    }
+                }
+
+                // 不含运行时表达式，由别的阶段负责：
+                is UseNode -> Unit      // use 语义上完全丢弃
+                is StructNode -> Unit   // 字段类型：阶段 5 StructResolver
+                is ConstNode -> Unit    // 初值：阶段 4 ConstEval（受限常量形式）
+            }
         }
     }
 
-    private fun checkFunctionBody(node: FnNode) {
+    /** impl 目标在阶段 2 已校验为 struct；这里重新解析一次只为拿到符号。 */
+    private fun implOwner(node: ImplNode): StructSymbol? {
+        val target = ctx.resolveType(node.target) as? StructType ?: return null
+        return ctx.globals.lookupType(target.name) as? StructSymbol
+    }
+
+    /**
+     * [owner] 为 null = 顶层函数；非空 = impl 方法/关联函数。
+     * 方法体里允许写 `self`（
+     * [SemanticContext.currentHasSelfParam]）和 `Self`
+     * （[SemanticContext.currentSelfType]），二者都由本函数设置。
+     */
+    private fun checkFunctionBody(node: FnNode, owner: StructSymbol?) {
         val savedScope = ctx.currentScope
         val savedHasSelf = ctx.currentHasSelfParam
+        val savedSelfType = ctx.currentSelfType
 
         ctx.currentScope = ctx.globals.child()   // 函数作用域：放参数
-        ctx.currentHasSelfParam = false          // 顶层函数没有 receiver
+        ctx.currentHasSelfParam = node.params.any { it is SelfParam }
+        ctx.currentSelfType = owner
 
         try {
             for (param in node.params) {
@@ -36,10 +73,12 @@ class BodyChecker(private val ctx: SemanticContext) {
         } finally {
             ctx.currentScope = savedScope
             ctx.currentHasSelfParam = savedHasSelf
+            ctx.currentSelfType = savedSelfType
         }
     }
 
-    private fun checkBlock(block: BlockExprNode) {
+    /** 块作用域：进入压一层、退出弹回。表达式层处理块表达式时回调这里。 */
+    internal fun checkBlock(block: BlockExprNode) {
         val savedScope = ctx.currentScope
         ctx.currentScope = savedScope.child()
 
@@ -47,7 +86,7 @@ class BodyChecker(private val ctx: SemanticContext) {
             for (stmt in block.statements) {
                 checkStatement(stmt)
             }
-            block.tail?.let { checkExpr(it) }
+            block.tail?.let { exprs.checkExpr(it) }
         } finally {
             ctx.currentScope = savedScope
         }
@@ -56,244 +95,15 @@ class BodyChecker(private val ctx: SemanticContext) {
     private fun checkStatement(stmt: StmtNode) {
         when (stmt) {
             is LetNode -> {
-                checkExpr(stmt.initializer)                 // 先查 initializer
+                // TODO(批次 A)：先解析 declaredType，再把它当 expected 传给 initializer。
+                exprs.checkExpr(stmt.initializer)
                 stmt.declaredType?.let { ctx.checkTypeRef(it) }
                 ctx.currentScope.defineLocal(
                     LocalSymbol(stmt.name, stmt.mutable, stmt.span)
                 )
             }
-            is ExprStmtNode -> checkExpr(stmt.expr)
+            is ExprStmtNode -> exprs.checkExpr(stmt.expr)
             else -> Unit
-        }
-    }
-
-    private fun checkExpr(expr: ExprNode) {
-        when (expr) {
-            is PathExprNode -> checkPathExpr(expr)
-            is CallExprNode -> checkCallExpr(expr)
-            is StructLitNode -> checkStructLitExpr(expr)
-            is BlockExprNode -> checkBlock(expr)
-
-            is IfExprNode -> {
-                checkExpr(expr.condition)
-                checkBlock(expr.thenblock)
-                expr.elseBranch?.let { checkExpr(it) }
-            }
-
-            is WhileExprNode -> {
-                checkExpr(expr.condition)
-                checkBlock(expr.block)
-            }
-
-            is LoopExprNode -> checkBlock(expr.block)
-            is UnaryExprNode -> checkExpr(expr.operand)
-            is ReferenceExprNode -> checkExpr(expr.operand)
-
-            is BinaryExprNode -> {
-                checkExpr(expr.left)
-                checkExpr(expr.right)
-            }
-
-            is AssignExprNode -> {
-                checkExpr(expr.target)
-                checkExpr(expr.value)
-            }
-
-            is FieldExprNode -> checkExpr(expr.receiver)
-
-            is IndexExprNode -> {
-                checkExpr(expr.receiver)
-                checkExpr(expr.index)
-            }
-
-            is MethodCallExprNode -> {
-                if (expr.name.genericArgs.isNotEmpty()) {
-                    throw SemanticError(
-                        expr.span,
-                        "method segments have no type parameters",
-                    )
-                }
-
-                checkExpr(expr.receiver)
-                for (arg in expr.args) checkExpr(arg)
-            }
-
-            is CastExprNode -> {
-                checkExpr(expr.expr)
-                ctx.checkTypeRef(expr.targetType)
-            }
-            is BreakExprNode -> expr.value?.let { checkExpr(it) }
-            is ReturnExprNode -> expr.value?.let { checkExpr(it) }
-
-            is ArrayLitNode -> {
-                for (element in expr.elements) checkExpr(element)
-                expr.repeat?.let {
-                    checkExpr(it.element)
-                    ctx.constEval.requireUsize(it.length)
-                }
-            }
-
-            is IntLitNode,
-            is BoolLitNode,
-            is UnitLitNode,
-            is ContinueExprNode -> Unit
-
-            else -> Unit
-        }
-    }
-
-    private fun checkPathExpr(node: PathExprNode) {
-        val first = node.segments.firstOrNull()
-            ?: throw SemanticError(node.span, "empty path")
-
-        if (node.segments.size == 1) {
-            checkSingleSegmentValuePath(node, first)
-            return
-        }
-
-        checkMultiSegmentPath(node)
-    }
-
-    private fun checkSingleSegmentValuePath(
-        node: PathExprNode,
-        segment: PathSegment,
-    ) {
-        val name = segment.name
-
-        if (name == "self") {
-            if (!ctx.currentHasSelfParam) {
-                throw SemanticError(node.span, "`self` is only allowed inside a method")
-            }
-            if (segment.genericArgs.isNotEmpty()) {
-                throw SemanticError(node.span, "`self` takes no type arguments")
-            }
-            return
-        }
-
-        ctx.currentScope.lookupValue(name)
-            ?: throw SemanticError(node.span, "unresolved value '$name'")
-
-        if (segment.genericArgs.isNotEmpty()) {
-            throw SemanticError(
-                node.span,
-                "functions and values have no type parameters",
-            )
-        }
-    }
-
-    private fun checkMultiSegmentPath(node: PathExprNode) {
-        val first = node.segments.first()
-
-        if (first.name == "Self") {
-            if (ctx.currentSelfType == null) {
-                throw SemanticError(node.span, "`Self` is not allowed here")
-            }
-            if (first.genericArgs.isNotEmpty()) {
-                throw SemanticError(node.span, "`Self` takes no type arguments")
-            }
-        } else {
-            val symbol = ctx.currentScope.lookupType(first.name)
-                ?: throw SemanticError(
-                    node.span,
-                    "unresolved path '${first.name}'",
-                )
-
-            when (symbol) {
-                is BuiltinTypeSymbol -> when (symbol.kind) {
-                    BuiltinTypeKind.BOX,
-                    BuiltinTypeKind.VEC -> {
-                        // 表达式位置：Box::new / Vec::new 缺少类型实参是 UB，
-                        // 规范不要求报错；但多于一个一定是错误。
-                        if (first.genericArgs.size > 1) {
-                            throw SemanticError(
-                                node.span,
-                                "'${first.name}' takes at most one type argument here",
-                            )
-                        }
-                    }
-
-                    else -> {
-                        if (first.genericArgs.isNotEmpty()) {
-                            throw SemanticError(
-                                node.span,
-                                "primitive type '${first.name}' takes no type arguments",
-                            )
-                        }
-                    }
-                }
-
-                is StructSymbol -> {
-                    if (first.genericArgs.isNotEmpty()) {
-                        throw SemanticError(
-                            node.span,
-                            "struct '${first.name}' has no type parameters",
-                        )
-                    }
-                }
-
-                else -> throw SemanticError(
-                    node.span,
-                    "unresolved path '${first.name}'",
-                )
-            }
-        }
-
-        // 第二段及以后：关联函数/常量/方法都没有类型参数
-        for (segment in node.segments.drop(1)) {
-            if (segment.genericArgs.isNotEmpty()) {
-                throw SemanticError(
-                    node.span,
-                    "associated items have no type parameters",
-                )
-            }
-        }
-
-        // 泛型实参里的类型名仍然要递归检查
-        for (segment in node.segments) {
-            for (arg in segment.genericArgs) {
-                ctx.checkTypeRef(arg)
-            }
-        }
-    }
-
-    private fun checkCallExpr(node: CallExprNode) {
-        checkExpr(node.callee)
-
-        // 只对单段路径做可调用性检查，多段路径留到调用解析
-        if (node.callee is PathExprNode && node.callee.segments.size == 1) {
-            val name = node.callee.segments[0].name
-            val symbol = ctx.currentScope.lookupValue(name)
-
-            if (symbol != null &&
-                symbol !is FunctionSymbol &&
-                symbol !is BuiltinFunctionSymbol
-            ) {
-                throw SemanticError(node.callee.span, "'$name' is not callable")
-            }
-        }
-
-        for (arg in node.args) {
-            checkExpr(arg)
-        }
-    }
-
-    private fun checkStructLitExpr(node: StructLitNode) {
-        val name = node.path.lastOrNull()
-            ?: throw SemanticError(node.span, "empty struct path")
-
-        if (name == "Self") {
-            if (ctx.currentSelfType == null) {
-                throw SemanticError(node.span, "`Self` is not allowed here")
-            }
-        } else {
-            val symbol = ctx.currentScope.lookupType(name)
-            if (symbol !is StructSymbol) {
-                throw SemanticError(node.span, "unresolved struct type '$name'")
-            }
-        }
-
-        for (field in node.fields) {
-            checkExpr(field.value)
         }
     }
 }
