@@ -37,7 +37,7 @@ class SemanticAnalyzer {
         ctx.constEval.evaluateAll(crate)               // 4 常量求值
         StructResolver(ctx).resolve(crate.items)       // 5 结构体字段
         FunctionResolver(ctx).resolve(crate.items)     // 6 函数签名
-        // 7 TODO: 全局约束（递归布局 / derive 能力）
+        GlobalConstraints(ctx).check(crate.items)      // 7 全局约束（递归布局 / derive 能力）
         BodyChecker(ctx).check(crate.items)            // 8 函数体
     }
 }

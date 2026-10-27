@@ -32,6 +32,8 @@ class ImplRegistry(private val ctx: SemanticContext) {
             throw SemanticError(target.span, "impl target must be a user-defined struct")
         }
 
+
+        // 对于当前global中的struct进行lookupType，确定这个impl有正确的struct
         val symbol = ctx.globals.lookupType(resolved.name) as? StructSymbol
             ?: throw SemanticError(target.span, "impl target must be a user-defined struct")
 
