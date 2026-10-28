@@ -90,3 +90,5 @@ data class BoxType(val element: Type) : Type {
 data class VecType(val element: Type) : Type {
     override fun toString(): String = "Vec<$element>"
 }
+
+data object UnknownType : Type { override fun toString() = "?" }

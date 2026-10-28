@@ -22,6 +22,12 @@ class SemanticContext(
     /** 当前是否在带 self 参数的方法里；顶层函数为 false。 */
     var currentHasSelfParam: Boolean = false
 
+    /** 阶段 8：当前函数的返回类型（`return` 检查用）；顶层函数为 `()`。 */
+    var currentReturnType: Type = UnitType
+
+    /** 阶段 8：活跃循环栈（最内层在末尾）；`break` / `continue` 的归属与 `loop` 定型靠它。 */
+    val loopStack: ArrayDeque<LoopContext> = ArrayDeque()
+
     val constEval: ConstEval by lazy { ConstEval(globals, ::resolveType) }
 
     // ------------------------------------------------------------------
@@ -108,4 +114,20 @@ class SemanticContext(
             throw SemanticError(ref.span, "primitive type '$name' takes no type arguments")
         }
     }
+}
+
+/**
+ * 一个活跃的循环（阶段 8）。
+ *
+ * - [acceptsValue] = true 表示 `loop`（可以 `break value` 并用载荷定型）；`while` 为 false。
+ * - [expected] 来自外层目标类型（如 `let x: u32 = loop { ... }`），用来检查 break 载荷。
+ * - [span] 指向循环本身，为空 break 列表之类的诊断用。
+ */
+class LoopContext(
+    val acceptsValue: Boolean,
+    val expected: Type?,
+    val span: Span,
+) {
+    /** `loop` 收集到的所有 break 载荷类型；空 = 循环永不正常结束（`!`）。 */
+    val breakTypes: MutableList<Type> = mutableListOf()
 }

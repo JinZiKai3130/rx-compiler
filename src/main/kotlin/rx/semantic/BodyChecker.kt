@@ -11,9 +11,12 @@ import rx.ast.*
  * 块本身也是表达式（[BlockExprNode]），所以 [ExprChecker] 会回调 [checkBlock]：
  * 语句层管作用域，表达式层管值，两边互相持有引用是刻意的。
  *
- * 待接入（批次 A/C）：
- * - 记录 `currentReturnType`，供 `return` 检查；
- * - 维护 `loopStack`（`LoopContext { kind, breakTypes }`），供 break/continue 与 loop 定型。
+ * 已完成（批次 A）：
+ * - `currentReturnType`：`return` 载荷与函数体类型都对着它检查；
+ * - 块类型：尾表达式为值，块内出现发散语句（`!`）时整块为 `!`；
+ * - 无分号的 block-like 语句必须是 `()`。
+ *
+ * 待接入：循环栈由 [ExprChecker] 自己 push/pop，本类无需维护。
  */
 class BodyChecker(private val ctx: SemanticContext) {
 
@@ -55,55 +58,98 @@ class BodyChecker(private val ctx: SemanticContext) {
         val savedScope = ctx.currentScope
         val savedHasSelf = ctx.currentHasSelfParam
         val savedSelfType = ctx.currentSelfType
+        val savedReturnType = ctx.currentReturnType
 
         ctx.currentScope = ctx.globals.child()   // 函数作用域：放参数
         ctx.currentHasSelfParam = node.params.any { it is SelfParam }
         ctx.currentSelfType = owner
 
         try {
+            ctx.currentReturnType =
+                node.returnType?.let { ctx.resolveType(it) } ?: UnitType
+
             for (param in node.params) {
                 if (param is FnParam) {
                     ctx.currentScope.declareValue(
-                        LocalSymbol(param.name, param.mutable, null)
+                        LocalSymbol(
+                            name = param.name,
+                            mutable = param.mutable,
+                            type = ctx.resolveType(param.type),
+                            span = null,
+                        )
                     )
                 }
             }
 
-            checkBlock(node.body)
+            val bodyType = checkBlock(node.body, ctx.currentReturnType)
+            requireAssignable(
+                bodyType,
+                ctx.currentReturnType,
+                node.body.span,
+                "function body",
+            )
         } finally {
             ctx.currentScope = savedScope
             ctx.currentHasSelfParam = savedHasSelf
             ctx.currentSelfType = savedSelfType
+            ctx.currentReturnType = savedReturnType
         }
     }
 
     /** 块作用域：进入压一层、退出弹回。表达式层处理块表达式时回调这里。 */
-    internal fun checkBlock(block: BlockExprNode) {
+    internal fun checkBlock(block: BlockExprNode, expected: Type? = null): Type {
         val savedScope = ctx.currentScope
         ctx.currentScope = savedScope.child()
 
         try {
+            var diverges = false
             for (stmt in block.statements) {
-                checkStatement(stmt)
+                if (checkStatement(stmt)) diverges = true
             }
-            block.tail?.let { exprs.checkExpr(it) }
+            val tailType = block.tail?.let { exprs.check(it, expected) } ?: UnitType
+            return if (diverges) NeverType else tailType
         } finally {
             ctx.currentScope = savedScope
         }
     }
 
-    private fun checkStatement(stmt: StmtNode) {
+    /** 返回 true 表示这条语句之后不可达（语句的值类型是 `!`）。 */
+    private fun checkStatement(stmt: StmtNode): Boolean {
         when (stmt) {
             is LetNode -> {
-                // TODO(批次 A)：先解析 declaredType，再把它当 expected 传给 initializer。
-                exprs.checkExpr(stmt.initializer)
-                stmt.declaredType?.let { ctx.checkTypeRef(it) }
+                // 先解析 declaredType，再把它当 expected 传给 initializer
+                val declared = stmt.declaredType?.let { ctx.resolveType(it) }
+                val initType = exprs.check(stmt.initializer, declared)
+                if (declared != null) {
+                    requireAssignable(
+                        initType,
+                        declared,
+                        stmt.initializer.span,
+                        "let initializer",
+                    )
+                }
                 ctx.currentScope.defineLocal(
-                    LocalSymbol(stmt.name, stmt.mutable, stmt.span)
+                    LocalSymbol(
+                        name = stmt.name,
+                        mutable = stmt.mutable,
+                        type = declared ?: initType,
+                        span = stmt.span,
+                    )
                 )
+                return false
             }
-            is ExprStmtNode -> exprs.checkExpr(stmt.expr)
-            else -> Unit
+
+            is ExprStmtNode -> {
+                // 带分号：值被丢弃，任意类型都行；不带分号：必须 ()
+                val expected = if (stmt.hasSemicolon) null else UnitType
+                val type = exprs.check(stmt.expr, expected)
+                if (!stmt.hasSemicolon) {
+                    requireAssignable(type, UnitType, stmt.span, "block statement")
+                }
+                return type == NeverType
+            }
+
+            else -> return false
         }
     }
 }

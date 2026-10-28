@@ -379,6 +379,20 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
                 )
         }
 
+        // 文法上 `statement : expressionWithBlock SEMI?` 与"块尾表达式"重叠：
+        // `{ { x + 1 } }` 里的内层块会被 ANTLR 归成 statement。没有显式尾表达式时，
+        // 把最后一条"无分号的表达式语句"提升为尾表达式——块的值就是它。
+        // 带分号的语句（`1;`）不会被提升，所以"分号吞掉尾值"的语义不受影响。
+        val last = statements.lastOrNull()
+        if (tail == null && last is ExprStmtNode && !last.hasSemicolon) {
+            statements.removeAt(statements.lastIndex)
+            return BlockExprNode(
+                statements = statements,
+                tail = last.expr,
+                span = spanOf(ctx),
+            )
+        }
+
         return BlockExprNode(
             statements = statements,
             tail = tail,
@@ -404,7 +418,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
                     "Unsupported statement '${ctx.text}'"
                 )
 
-            return ExprStmtNode(expression, spanOf(ctx))
+            return ExprStmtNode(expression, ctx.SEMI() != null, spanOf(ctx))
         }
 
         if (ctx.statementExpression() != null) {
@@ -413,7 +427,7 @@ class AstBuilder : RxParserBaseVisitor<AstNode>() {
                     "Unsupported statement expression '${ctx.text}'"
                 )
 
-            return ExprStmtNode(expression, spanOf(ctx))
+            return ExprStmtNode(expression, true, spanOf(ctx))
         }
 
         // 到此只剩 `;`

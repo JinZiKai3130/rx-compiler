@@ -1,7 +1,7 @@
 # 阶段 8：表达式类型检查清单
 
-> 状态（2026-10-27）：阶段 0–7 已完成并验收。
-> 基线：`accept 69/69`、`reject 58/167`。**剩余 109 个 reject 全部属于阶段 8。**
+> 状态（2026-10-28）：阶段 0–7 已完成；批次 A 已完成。
+> 基线：`accept 69/69`、`reject 80/167`。**剩余 87 个 reject。**
 > 本文件是阶段 8 的施工图：机制、逐节点规则、实施顺序、验收数字、坑清单。
 
 ---
@@ -164,6 +164,10 @@ fun join(a: Type, b: Type): Type?      // LUB，用于 if 两支 / 数组元素 
 4. **不可达代码照样检查**：`return 1; undefined_name;` 要报错；`if true {} else { bad }` 也要报错。**不剪枝**。
 5. **`while` 的条件在循环外**：检查 condition 时循环尚未入栈，condition 里的 `break` 不能 targeting 这个 while。
 6. **短路的只是求值语义**，静态检查两支都做。
+7. **无分号的 block-like 语句 = 块尾**：文法上 `statement : expressionWithBlock SEMI?` 与尾表达式重叠，ANTLR 会把
+   `{ { x + 1 } }` 的内层块归成 statement。`AstBuilder.visitBlockExpression` 因此在“没有显式尾表达式”时，
+   把最后一条无分号的 `ExprStmtNode` 提升为 `tail`（块的值就是它）。带分号的 `1;` 不会提升，
+   所以“分号吞掉尾值”的语义不变。
 
 ---
 
@@ -173,7 +177,7 @@ fun join(a: Type, b: Type): Type?      // LUB，用于 if 两支 / 数组元素 
 
 | 批次 | 内容 | 目标目录 | reject 数 | 累计 reject |
 | --- | --- | --- | --- | --- |
-| **A** | `check(expr, expected)` 骨架 + 字面量/路径/块/if/unit/never + 三种跳转 | `blocks-if-and-never` 5、`unreachable-checks` 3、`loops-and-jumps` 7 | 15 | 73 |
+| **A ✅** | `check(expr, expected)` 骨架 + 字面量/路径/块/if/unit/never + 三种跳转 | `blocks-if-and-never` 5、`unreachable-checks` 3、`loops-and-jumps` 7 | 15 | 73（实测 **80**，顺带带上 boolean/integer/casts/lifetimes 共 5 个） |
 | **B** | 全部二元/一元运算符 + 一层共享引用规则 | `integer-arithmetic` 4、`boolean-and-short-circuit` 4、`shifts` 2、`scalar-reference-operators` 4 | 14 | 87 |
 | **C** | `Place` + `AssignExpr` + `ReferenceExpr` + 解引用 | `references-and-mutability` 6、`compound-assignment` 4、`evaluation-order` 2 | 12 | 99 |
 | **D** | `Call` + 内建函数/构造函数 + 方法查找与 autoref | `calls-recursion-and-abi` 3、`builtin-io` 4、`box-and-moves` 4、`vec-operations` 6、`nested-containers` 2、`lifetimes-and-use` 1 | 20 | 119 |

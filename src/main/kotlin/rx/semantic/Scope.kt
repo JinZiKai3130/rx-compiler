@@ -44,9 +44,4 @@ class Scope(val parent: Scope?) {
     fun lookupType(name: String): Symbol? =
         types[name] ?: parent?.lookupType(name)
 
-    /** 只看当前层（重名报错时用来找到"先声明"的那个符号）。 */
-    fun lookupValueHere(name: String): Symbol? = values[name]
-
-    /** 只看当前层（同上，类型名字空间）。 */
-    fun lookupTypeHere(name: String): Symbol? = types[name]
 }

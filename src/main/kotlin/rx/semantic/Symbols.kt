@@ -53,10 +53,11 @@ class ConstantSymbol(
     val owner: StructSymbol? = null,   // 顶层常量 = null；impl 里 = 所属 struct
 ) : Symbol
 
-/** 局部变量与函数参数（值名字空间）。[span] = 声明处，供"未定义/重复定义"报错定位。 */
+/** 局部变量与函数参数（值名字空间）。[type] = 绑定类型，[span] = 声明处。 */
 class LocalSymbol(
     override val name: String,
     val mutable: Boolean,
+    val type: Type,
     val span: Span?,
 ) : Symbol
 
