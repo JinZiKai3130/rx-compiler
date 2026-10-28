@@ -107,6 +107,7 @@ class ExprChecker(
         }
         requireAssignable(condType, BoolType, node.condition.span, "while condition")
 
+        // 这里才进入循环体
         ctx.loopStack.addLast(
             LoopContext(acceptsValue = false, expected = expected, span = node.span)
         )

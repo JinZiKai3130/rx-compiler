@@ -60,6 +60,7 @@ class BodyChecker(private val ctx: SemanticContext) {
         val savedSelfType = ctx.currentSelfType
         val savedReturnType = ctx.currentReturnType
 
+        // 进入新的一个scope
         ctx.currentScope = ctx.globals.child()   // 函数作用域：放参数
         ctx.currentHasSelfParam = node.params.any { it is SelfParam }
         ctx.currentSelfType = owner
@@ -67,7 +68,7 @@ class BodyChecker(private val ctx: SemanticContext) {
         try {
             ctx.currentReturnType =
                 node.returnType?.let { ctx.resolveType(it) } ?: UnitType
-
+            // 检查当前的参数是否是fnparam，并在当前的作用域中进行declare
             for (param in node.params) {
                 if (param is FnParam) {
                     ctx.currentScope.declareValue(
@@ -80,7 +81,7 @@ class BodyChecker(private val ctx: SemanticContext) {
                     )
                 }
             }
-
+            // 这里开始检查函数体，进入checkblock
             val bodyType = checkBlock(node.body, ctx.currentReturnType)
             requireAssignable(
                 bodyType,
@@ -102,12 +103,18 @@ class BodyChecker(private val ctx: SemanticContext) {
         ctx.currentScope = savedScope.child()
 
         try {
+            // 发散只决定"没有尾表达式"时的块类型。
+            // 有尾表达式时，块类型就是尾表达式的类型——即使前面的语句已经发散：
+            // 不可达的尾表达式同样参与类型检查（unreachable-checks）。
             var diverges = false
             for (stmt in block.statements) {
                 if (checkStatement(stmt)) diverges = true
             }
-            val tailType = block.tail?.let { exprs.check(it, expected) } ?: UnitType
-            return if (diverges) NeverType else tailType
+
+            val tail = block.tail
+            if (tail != null) return exprs.check(tail, expected)
+
+            return if (diverges) NeverType else UnitType
         } finally {
             ctx.currentScope = savedScope
         }
