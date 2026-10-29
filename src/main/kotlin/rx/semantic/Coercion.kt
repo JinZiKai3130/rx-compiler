@@ -18,8 +18,9 @@ internal fun assignable(from: Type, to: Type): Boolean = when {
     from == NeverType -> true
     // 脚手架：尚未实现类型推导的表达式一律放行
     from == UnknownType || to == UnknownType -> true
-    // &mut T → &T（只允许顶层弱化，内层不改写）
-    from is RefType && to is RefType -> from.mutable && !to.mutable && from.inner == to.inner
+    // 引用：可变性只能弱化（&mut T → &T），内层继续按可赋值性递归
+    from is RefType && to is RefType ->
+        (!to.mutable || from.mutable) && assignable(from.inner, to.inner)
     else -> false
 }
 
@@ -30,6 +31,9 @@ internal fun join(a: Type, b: Type, span: Span, what: String): Type = when {
     a == UnknownType -> b
     b == UnknownType -> a
     a == b -> a
+    // 引用 LUB：`&mut T` 与 `&T` 的公共类型是 `&T`（只能弱化，不能加强）
+    a is RefType && b is RefType ->
+        RefType(a.mutable && b.mutable, join(a.inner, b.inner, span, what))
     else -> throw SemanticError(span, "$what: incompatible types $a vs $b")
 }
 

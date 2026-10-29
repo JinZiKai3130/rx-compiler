@@ -1,7 +1,7 @@
 # 阶段 8：表达式类型检查清单
 
-> 状态（2026-10-28）：阶段 0–7 已完成；批次 A 已完成。
-> 基线：`accept 69/69`、`reject 80/167`。**剩余 87 个 reject。**
+> 状态（2026-10-29）：阶段 0–7 已完成；批次 A、B 已完成。
+> 基线：`accept 69/69`、`reject 96/167`。**剩余 71 个 reject。**
 > 本文件是阶段 8 的施工图：机制、逐节点规则、实施顺序、验收数字、坑清单。
 
 ---
@@ -182,7 +182,7 @@ fun join(a: Type, b: Type): Type?      // LUB，用于 if 两支 / 数组元素 
 | 批次 | 内容 | 目标目录 | reject 数 | 累计 reject |
 | --- | --- | --- | --- | --- |
 | **A ✅** | `check(expr, expected)` 骨架 + 字面量/路径/块/if/unit/never + 三种跳转 | `blocks-if-and-never` 5、`unreachable-checks` 3、`loops-and-jumps` 7 | 15 | 73（实测 **80**，顺带带上 boolean/integer/casts/lifetimes 共 5 个） |
-| **B** | 全部二元/一元运算符 + 一层共享引用规则 | `integer-arithmetic` 4、`boolean-and-short-circuit` 4、`shifts` 2、`scalar-reference-operators` 4 | 14 | 87 |
+| **B ✅** | 全部二元/一元运算符 + 一层共享引用规则 + 强转 | `integer-arithmetic` 4、`boolean-and-short-circuit` 4、`shifts` 2、`scalar-reference-operators` 4 | 14 | 96（顺带带上 casts 4/4） |
 | **C** | `Place` + `AssignExpr` + `ReferenceExpr` + 解引用 | `references-and-mutability` 6、`compound-assignment` 4、`evaluation-order` 2 | 12 | 99 |
 | **D** | `Call` + 内建函数/构造函数 + 方法查找与 autoref | `calls-recursion-and-abi` 3、`builtin-io` 4、`box-and-moves` 4、`vec-operations` 6、`nested-containers` 2、`lifetimes-and-use` 1 | 20 | 119 |
 | **E** | 聚合：结构体字面量/字段/下标/数组 + 可变性穿透 | `structs-and-fields` 6、`arrays` 5、`vec-index-mutability` 14、`aggregate-arguments-and-reference-fields` 2 | 27 | 146 |
