@@ -44,17 +44,13 @@ class ExprChecker(
             is CallExprNode -> checkCallExpr(expr)
             is StructLitNode -> checkStructLitExpr(expr)
 
-            is UnaryExprNode -> { check(expr.operand); UnknownType }
-            is ReferenceExprNode -> { check(expr.operand); UnknownType }
-            is BinaryExprNode -> { check(expr.left); check(expr.right); UnknownType }
+            is UnaryExprNode -> checkUnary(expr)
+            is ReferenceExprNode -> checkReference(expr)
+            is BinaryExprNode -> checkBinary(expr, expected)
             is FieldExprNode -> { check(expr.receiver); UnknownType }
             is IndexExprNode -> { check(expr.receiver); check(expr.index); UnknownType }
             is MethodCallExprNode -> checkMethodCall(expr)
-            is CastExprNode -> {
-                check(expr.expr)
-                ctx.checkTypeRef(expr.targetType)
-                UnknownType
-            }
+            is CastExprNode -> checkCast(expr)
             is ArrayLitNode -> {
                 for (element in expr.elements) check(element)
                 expr.repeat?.let {
@@ -166,6 +162,179 @@ class ExprChecker(
         val valueType = node.value?.let { check(it, ctx.currentReturnType) } ?: UnitType
         requireAssignable(valueType, ctx.currentReturnType, node.span, "return value")
         return NeverType
+    }
+    
+    /** `&expr` / `&mut expr`：先只给出类型；place 与可变性检查在批次 C。 */
+    private fun checkReference(node: ReferenceExprNode): Type {
+        val inner = check(node.operand)
+        return RefType(node.mutable, inner)
+    }
+
+    private fun checkUnary(node: UnaryExprNode): Type = when (node.op) {
+        UnOp.NEG -> { // 负号
+            val operand = stripSharedRef(
+                check(node.operand),
+                node.operand.span,
+                "unary '-' operand",
+            )
+            if (operand != UnknownType) {
+                val integer = operand as? IntegerType
+                    ?: throw SemanticError(
+                        node.operand.span,
+                        "unary '-' requires an integer, found $operand",
+                    )
+                if (!integer.signed) {
+                    throw SemanticError(
+                        node.operand.span,
+                        "unary '-' requires a signed integer, found $operand",
+                    )
+                }
+            }
+            operand
+        }
+
+        UnOp.NOT -> { // !的处理
+            val operand = stripSharedRef(
+                check(node.operand),
+                node.operand.span,
+                "unary '!' operand",
+            )
+            if (operand != UnknownType && operand !is IntegerType && operand != BoolType) {
+                throw SemanticError(
+                    node.operand.span,
+                    "unary '!' requires an integer or bool, found $operand",
+                )
+            }
+            operand
+        }
+
+        UnOp.DEREF -> {
+            check(node.operand)      // `*p` 的类型依赖 place，批次 C 再补
+            UnknownType
+        }
+    }
+
+    private fun checkBinary(node: BinaryExprNode, expected: Type?): Type = when (node.op) {
+        BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD -> checkArithmetic(node, expected)
+        BinOp.BIT_AND, BinOp.BIT_OR, BinOp.BIT_XOR -> checkBitwise(node, expected)
+        BinOp.SHL, BinOp.SHR -> checkShift(node, expected)
+        BinOp.AND, BinOp.OR -> checkLogical(node)
+        BinOp.EQ, BinOp.NE -> checkEquality(node, expected)
+        BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> checkOrdering(node, expected)
+    }
+
+    private fun checkArithmetic(node: BinaryExprNode, expected: Type?): Type {
+        val left = stripSharedRef(check(node.left, expected), node.left.span, "left operand")
+        val right = stripSharedRef(
+            check(node.right, left.takeIf { it is IntegerType }),   // 用剥过引用的左类型当期望
+            node.right.span,
+            "right operand",
+        )
+
+        val type = mergeOperandTypes(left, right, node.span)
+        if (type != UnknownType && type !is IntegerType) {
+            throw SemanticError(node.span, "arithmetic requires integers, found $type")
+        }
+        return type
+    }
+
+    private fun checkBitwise(node: BinaryExprNode, expected: Type?): Type {
+        val left = stripSharedRef(check(node.left, expected), node.left.span, "left operand")
+        val right = stripSharedRef(
+            check(node.right, left.takeIf { it is IntegerType || it == BoolType }),
+            node.right.span,
+            "right operand",
+        )
+
+        val type = mergeOperandTypes(left, right, node.span)
+        if (type != UnknownType && type !is IntegerType && type != BoolType) {
+            throw SemanticError(node.span, "bitwise operators require integers or bool, found $type")
+        }
+        return type
+    }
+
+    private fun checkShift(node: BinaryExprNode, expected: Type?): Type {
+        val left = stripSharedRef(check(node.left, expected), node.left.span, "shift left operand")
+        val count = stripSharedRef(check(node.right), node.right.span, "shift count")
+
+        if (left != UnknownType && left !is IntegerType) {
+            throw SemanticError(node.left.span, "shift left operand must be an integer, found $left")
+        }
+        // 计数只需是整数，**不要求**与左操作数同型（3i32 << 33u32 是合法用例）
+        if (count != UnknownType && count !is IntegerType) {
+            throw SemanticError(node.right.span, "shift count must be an integer, found $count")
+        }
+        return left
+    }
+
+    private fun checkLogical(node: BinaryExprNode): Type {
+        // && / || 没有引用变体：这里**不**剥引用
+        val left = check(node.left, BoolType)
+        val right = check(node.right, BoolType)
+        val op = if (node.op == BinOp.AND) "&&" else "||"
+
+        requireAssignable(left, BoolType, node.left.span, "left operand of '$op'")
+        requireAssignable(right, BoolType, node.right.span, "right operand of '$op'")
+        return BoolType
+    }
+
+    private fun checkEquality(node: BinaryExprNode, expected: Type?): Type {
+        val left = check(node.left, expected)
+        val right = check(node.right, left)
+
+        if (!assignable(right, left) && !assignable(left, right)) {
+            throw SemanticError(
+                node.span,
+                "equality operands must have the same type: $left vs $right",
+            )
+        }
+        return BoolType
+    }
+
+    private fun checkOrdering(node: BinaryExprNode, expected: Type?): Type {
+        // 比较是**不对称**的：左边先定型，右边向左边调整
+        val left = check(node.left, expected)
+        val right = check(node.right, left)
+
+        requireAssignable(right, left, node.right.span, "right operand")
+        requireComparable(left, node.left.span, "left operand")
+        return BoolType
+    }
+
+    /** 去掉全部引用层后必须是整数或布尔。 */
+    private fun requireComparable(type: Type, span: Span, what: String) {
+        if (type == UnknownType) return
+        var base: Type = type
+        while (base is RefType) base = base.inner
+        if (base !is IntegerType && base != BoolType) {
+            throw SemanticError(span, "$what cannot be ordered: $type")
+        }
+    }
+
+    /** 两侧必须同型；任一侧未知时整表达式未知（避免误伤未实现节点的类型）。 */
+    private fun mergeOperandTypes(left: Type, right: Type, span: Span): Type = when {
+        left == UnknownType || right == UnknownType -> UnknownType
+        left == right -> left
+        else -> throw SemanticError(span, "operands must have the same type: $left vs $right")
+    }
+
+    private fun checkCast(node: CastExprNode): Type {
+        val target = ctx.resolveType(node.targetType)
+        if (target !is IntegerType) {
+            throw SemanticError(
+                node.targetType.span,
+                "casts must target an integer type, found $target",
+            )
+        }
+
+        val source = check(node.expr)
+        if (source != UnknownType && source !is IntegerType && source != BoolType) {
+            throw SemanticError(
+                node.expr.span,
+                "only integers and bool can be cast, found $source",
+            )
+        }
+        return target
     }
 
     private fun checkPathExpr(node: PathExprNode): Type {

@@ -40,4 +40,16 @@ internal fun requireAssignable(from: Type, to: Type, span: Span, what: String) {
     }
 }
 
-
+/**
+ * 剥掉一层**共享**引用（`&T → T`）。
+ *
+ * 算术 / 位运算 / 移位 / 一元运算最多允许一层 `&`：
+ * - `&mut T` 直接拒绝（`-&mut a` 就是用例）；
+ * - `&&T` 剥一层后仍是 `&T`，后面的"必须是整数"检查自然会失败，不需要单独数层数。
+ */
+internal fun stripSharedRef(type: Type, span: Span, what: String): Type = when {
+    type == UnknownType -> UnknownType
+    type is RefType && !type.mutable -> type.inner
+    type is RefType -> throw SemanticError(span, "$what does not accept a mutable reference")
+    else -> type
+}
