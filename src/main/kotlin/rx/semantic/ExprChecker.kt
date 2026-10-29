@@ -36,8 +36,7 @@ class ExprChecker(
             is ReturnExprNode -> checkReturn(expr)
 
             is AssignExprNode -> {
-                check(expr.target)
-                check(expr.value)
+                checkAssign(expr)
                 UnitType                       // 赋值表达式的值恒为 ()
             }
 
@@ -166,8 +165,17 @@ class ExprChecker(
     
     /** `&expr` / `&mut expr`：先只给出类型；place 与可变性检查在批次 C。 */
     private fun checkReference(node: ReferenceExprNode): Type {
-        val inner = check(node.operand)
-        return RefType(node.mutable, inner)
+        val place = checkPlace(node.operand)          // 永远先检查/定型（共用 & 和 &mut）
+        val inner = node.operand.type!!
+
+        // 仅仅是&
+        if (!node.mutable) return RefType(false, inner)   // &e：只要表达式合法即可
+
+        // &mut e：是 place 就必须可写；不是 place = 临时值，可以
+        if (place != null && !place.mutable) {
+            throw SemanticError(node.operand.span, "cannot mutably borrow an immutable place")
+        }
+        return RefType(true, inner)
     }
 
     private fun checkUnary(node: UnaryExprNode): Type = when (node.op) {
@@ -208,10 +216,7 @@ class ExprChecker(
             operand
         }
 
-        UnOp.DEREF -> {
-            check(node.operand)      // `*p` 的类型依赖 place，批次 C 再补
-            UnknownType
-        }
+        UnOp.DEREF -> placeOfDeref(node).type
     }
 
     private fun checkBinary(node: BinaryExprNode, expected: Type?): Type = when (node.op) {
@@ -335,6 +340,162 @@ class ExprChecker(
             )
         }
         return target
+    }
+
+    private fun checkAssign(node: AssignExprNode): Type {
+        val place = checkPlace(node.target)
+            ?: throw SemanticError(node.target.span, "assignment target is not a place")
+        if (!place.mutable) {
+            throw SemanticError(node.target.span, "cannot assign to an immutable place")
+        }
+
+        if (node.op == AssignOp.ASSIGN) {
+            val valueType = check(node.value, place.type)        // 让无后缀字面量按目标定型
+            requireAssignable(valueType, place.type, node.value.span, "assignment")
+            return UnitType
+        }
+        // 复合赋值 ↓
+        checkCompoundAssignment(node, place.type)
+        return UnitType
+    }
+
+    private fun checkCompoundAssignment(node: AssignExprNode, targetType: Type) {
+        if (targetType == UnknownType) {
+            check(node.value)
+            return
+        }
+
+        val rhs = stripSharedRef(
+            check(node.value, targetType.takeIf { it is IntegerType || it == BoolType }),
+            node.value.span,
+            "right operand of compound assignment",
+        )
+
+        when (node.op) {
+            AssignOp.ADD_ASSIGN, AssignOp.SUB_ASSIGN, AssignOp.MUL_ASSIGN,
+            AssignOp.DIV_ASSIGN, AssignOp.MOD_ASSIGN -> {
+                if (targetType !is IntegerType) {
+                    throw SemanticError(
+                        node.target.span,
+                        "arithmetic compound assignment requires an integer destination, found $targetType",
+                    )
+                }
+                requireSameOperandType(rhs, targetType, node)
+
+            }
+
+            AssignOp.BIT_AND_ASSIGN, AssignOp.BIT_OR_ASSIGN, AssignOp.BIT_XOR_ASSIGN -> {
+                if (targetType !is IntegerType && targetType != BoolType) {
+                    throw SemanticError(
+                        node.target.span,
+                        "bitwise compound assignment requires an integer or bool destination, found $targetType",
+                    )
+                }
+                requireSameOperandType(rhs, targetType, node)
+            }
+
+            AssignOp.SHL_ASSIGN, AssignOp.SHR_ASSIGN -> { // 左移 右移
+                if (targetType !is IntegerType) {
+                    throw SemanticError(
+                        node.target.span,
+                        "shift compound assignment requires an integer destination, found $targetType",
+                    )
+                }
+                // 计数只要是整数即可，不要求同型
+                if (rhs != UnknownType && rhs !is IntegerType) {
+                    throw SemanticError(
+                        node.value.span,
+                        "shift count must be an integer, found $rhs",
+                    )
+                }
+            }
+
+            AssignOp.ASSIGN -> Unit
+        }
+    }
+
+    /** RHS 与 LHS 必须同型；RHS 是脚手架 `?` 时放行。 */
+    private fun requireSameOperandType(rhs: Type, lhs: Type, node: AssignExprNode) {
+        if (rhs != UnknownType && rhs != lhs) {
+            throw SemanticError(
+                node.value.span,
+                "compound assignment operands must have the same type: $lhs vs $rhs",
+            )
+        }
+    }
+
+    private fun checkPlace(expr: ExprNode): Place? = when (expr) {
+        is PathExprNode   -> placeOfPath(expr)
+        is UnaryExprNode  -> if (expr.op == UnOp.DEREF) placeOfDeref(expr)
+                            else { check(expr); null }
+        is FieldExprNode  -> placeOfField(expr)
+        is IndexExprNode  -> placeOfIndex(expr)
+        else              -> { check(expr); null }   // 字面量 / 二元 / 调用 / 块 / 强转…
+    }
+
+    private fun placeOfPath(node: PathExprNode): Place? {
+        val type = check(node)
+        val segment = node.segments.singleOrNull() ?: return null
+        val symbol = ctx.currentScope.lookupValue(segment.name) as? LocalSymbol ?: return null
+        return Place(type, symbol.mutable, underShared = false)
+    }
+
+    private fun placeOfDeref(node: UnaryExprNode): Place {
+        val base = checkPlace(node.operand)          // 保证 operand.type 已写回
+        val operandType = node.operand.type!!        // 契约：checkPlace 后非 null
+
+        if (operandType == UnknownType) {            // 脚手架通配，见下
+            node.type = UnknownType                  // 契约：checkPlace 返回后 type 必须非 null
+            return Place(UnknownType, mutable = true, underShared = false)
+        }
+
+        val place = when (operandType) {
+            is RefType -> {
+                val inherited = base?.underShared ?: false
+                Place(
+                    type = operandType.inner,
+                    mutable = operandType.mutable && !inherited,
+                    underShared = inherited || !operandType.mutable,
+                )
+            }
+            // Box<T> 的解引用是"投影"：可写性跟盒子本身走；
+            // 盒子里装的是 &mut T 时，写权限来自那层 &mut（下一层 * 再算）
+            is BoxType -> Place(
+                type = operandType.element,
+                mutable = base?.mutable ?: true,
+                underShared = base?.underShared ?: false,
+            )
+            else -> throw SemanticError(node.span, "cannot dereference a value of type $operandType")
+        }
+        node.type = place.type        // ← 契约：checkPlace 返回后 type 一定非 null
+        return place
+    }
+
+    private fun projectionPlace(base: Place?, baseType: Type): Place {
+        val writable = when {
+            baseType == UnknownType -> true
+            baseType is RefType -> baseType.mutable && !(base?.underShared ?: false)
+            else -> base?.mutable ?: true
+        }
+        return Place(
+            type = UnknownType,                        // 批次 E 换成真实字段/元素类型
+            mutable = writable,
+            // 只读路径上的 &mut 是"假的"：批次 E 靠它拒绝 Vec<&mut T> 的穿透写入
+            underShared = (base?.underShared ?: false) || !writable,
+        )
+    }
+
+    private fun placeOfField(node: FieldExprNode): Place? {
+        val base = checkPlace(node.receiver)
+        node.type = UnknownType
+        return projectionPlace(base, node.receiver.type!!)
+    }
+
+    private fun placeOfIndex(node: IndexExprNode): Place? {
+        val base = checkPlace(node.receiver)
+        check(node.index)
+        node.type = UnknownType
+        return projectionPlace(base, node.receiver.type!!)
     }
 
     private fun checkPathExpr(node: PathExprNode): Type {
