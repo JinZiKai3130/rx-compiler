@@ -171,7 +171,7 @@ class ExprChecker(
         // 仅仅是&
         if (!node.mutable) return RefType(false, inner)   // &e：只要表达式合法即可
 
-        // &mut e：是 place 就必须可写；不是 place = 临时值，可以
+        // &mut
         if (place != null && !place.mutable) {
             throw SemanticError(node.operand.span, "cannot mutably borrow an immutable place")
         }
@@ -522,7 +522,8 @@ class ExprChecker(
             if (segment.genericArgs.isNotEmpty()) {
                 throw SemanticError(node.span, "`self` takes no type arguments")
             }
-            return UnknownType       // self 的类型随方法签名，字段访问是批次 E
+            // 不再特殊返回：self 已由 BodyChecker 声明为 LocalSymbol，
+            // 类型（S / &S / &mut S）跟着签名走，交给下面的普通查找。
         }
 
         val symbol = ctx.currentScope.lookupValue(name)
@@ -542,7 +543,17 @@ class ExprChecker(
         }
     }
 
-    private fun checkMultiSegmentPath(node: PathExprNode): Type {
+    /**
+     * 解析多段路径的第一段并完成整条路径的静态校验：
+     * - `Self` → 当前 impl 的 struct；
+     * - 结构体名 → 该 struct；
+     * - `Box` / `Vec` 等内建类型 → null（没有成员表，调用解析单独处理）。
+     *
+     * 校验内容：第一段泛型实参的合法性、后续段不得带泛型实参、
+     * 泛型实参里的类型名递归检查。取值（[checkMultiSegmentPath]）与
+     * 调用解析共用这一份逻辑。
+     */
+    private fun resolvePathOwner(node: PathExprNode): StructSymbol? {
         val first = node.segments.first()
         val owner: StructSymbol?
 
@@ -620,34 +631,177 @@ class ExprChecker(
             }
         }
 
+        return owner
+    }
+
+    private fun checkMultiSegmentPath(node: PathExprNode): Type {
+        val owner = resolvePathOwner(node)
         val member = owner?.associatedValues?.get(node.segments.last().name)
         return when (member) {
             is ConstantSymbol -> ctx.resolveType(member.node.type)
-            else -> UnknownType      // 关联函数作值：批次 D
+            else -> UnknownType      // 关联函数作值 / 内建构造器：批次 D
         }
     }
 
+    /**
+     * 调用表达式：先解析被调者，再用同一张参数表检查实参。
+     * 调用位置不再把 callee 当"值"检查——函数在这门语言里不是值。
+     */
     private fun checkCallExpr(node: CallExprNode): Type {
-        check(node.callee)
+        val callee = node.callee
+        if (callee !is PathExprNode) {
+            check(callee)                                  // 先报子表达式自己的错
+            throw SemanticError(callee.span, "expression is not callable")
+        }
+        if (callee.segments.isEmpty()) {
+            throw SemanticError(callee.span, "empty path")
+        }
 
-        // 只对单段路径做可调用性检查，多段路径留到调用解析
-        if (node.callee is PathExprNode && node.callee.segments.size == 1) {
-            val name = node.callee.segments[0].name
-            val symbol = ctx.currentScope.lookupValue(name)
+        val signature = resolveCallTarget(callee)
+        if (signature == null) {                           // 尚未支持的目标：保持 ?
+            for (arg in node.args) check(arg)
+            return UnknownType
+        }
+        checkArguments(node.args, signature, callee.span, describePath(callee))
+        return signature.returnType
+    }
+    
 
-            if (symbol != null &&
-                symbol !is FunctionSymbol &&
-                symbol !is BuiltinFunctionSymbol
-            ) {
-                throw SemanticError(node.callee.span, "'$name' is not callable")
+    /**
+     * 路径 → 调用签名。
+     * 返回 null = 目标暂未支持（内建容器除 new 以外的关联项）；
+     * 非法调用（不可调用 / 无此成员）在这里直接报错。
+     *
+     * 注意 `Type::method(receiver, args)`：这是“把方法当关联函数调用”的形式，
+     * self 由调用者显式传第一个实参，不做 autoref/autoderef，所以这里把
+     * self 的类型前插到形参表，而不是拒绝。
+     */
+    private fun resolveCallTarget(callee: PathExprNode): FunctionSignature? {
+        // ---- 单段：普通函数 / 内建函数 ----
+        if (callee.segments.size == 1) {
+            val segment = callee.segments[0]
+            if (segment.genericArgs.isNotEmpty()) {
+                throw SemanticError(callee.span, "functions and values have no type parameters")
+            }
+            
+            val symbol = ctx.currentScope.lookupValue(segment.name)
+            return when (symbol) {
+                null -> throw SemanticError(callee.span, "unresolved value '${segment.name}'")
+                is FunctionSymbol ->
+                    symbol.signature
+                        ?: throw SemanticError(callee.span, "function '${segment.name}' has no signature")
+                is BuiltinFunctionSymbol ->
+                    FunctionSignature(symbol.paramTypes, symbol.returnType, null)
+                else -> throw SemanticError(callee.span, "'${segment.name}' is not callable")
             }
         }
 
-        for (arg in node.args) {
-            check(arg)
+        // ---- 多段：关联函数 / 构造器 ----
+        val owner = resolvePathOwner(callee)               // 路径校验已经在这里完成
+        val name = callee.segments.last().name
+        val first = callee.segments.first()
+
+        if (owner == null) {                               // Box / Vec 等内建类型
+            // 先判断是否是内建类型
+            val kind = (ctx.globals.lookupType(first.name) as? BuiltinTypeSymbol)?.kind
+            // 含参变量
+            val element = first.genericArgs.firstOrNull()
+                ?.let { ctx.resolveType(it) } ?: UnknownType   // 缺省 → ?
+            return when {
+                // BOX::NEW
+                kind == BuiltinTypeKind.BOX && name == "new" ->
+                    FunctionSignature(listOf(element), BoxType(element), null)
+                // VEC::NEW
+                kind == BuiltinTypeKind.VEC && name == "new" ->
+                    FunctionSignature(emptyList(), VecType(element), null)
+                kind == BuiltinTypeKind.BOX || kind == BuiltinTypeKind.VEC ->
+                    null                                    // clone 等：容器方法表（后续小步）
+                else -> throw SemanticError(
+                    callee.span,
+                    "primitive type '${first.name}' has no associated items",
+                )
+            }
         }
-        return UnknownType           // 返回类型：批次 D
+
+        val member = owner.associatedValues[name]
+        if (member == null) {
+            // derive 生成的方法不在 associatedValues 里，需要单独识别
+            val derived = derivedMethodSignature(owner, name)
+                ?: throw SemanticError(
+                    callee.span,
+                    "no associated item '$name' in '${owner.name}'",
+                )
+            return withExplicitSelf(derived, owner)
+        }
+
+        return when (member) {
+            is FunctionSymbol -> withExplicitSelf(
+                member.signature
+                    ?: throw SemanticError(callee.span, "'$name' has no signature"),
+                owner,
+            )
+            else -> throw SemanticError(callee.span, "'$name' is not callable")
+        }
     }
+
+    /**
+     * `Type::method(receiver, args)`：self 变成显式的第一个实参。
+     * 引用由调用者自己写（S / &S / &mut S），这里不做 autoref。
+     */
+    private fun withExplicitSelf(
+        signature: FunctionSignature,
+        owner: StructSymbol,
+    ): FunctionSignature {
+        val selfParam = signature.selfParam ?: return signature
+        return FunctionSignature(
+            paramTypes = listOf(selfValueType(selfParam, owner)) + signature.paramTypes,
+            returnType = signature.returnType,
+            selfParam = null,                    // 已摊进 paramTypes
+        )
+    }
+
+    /**
+     * derive 自动生成的方法：目前只有 `clone(&self) -> Self`
+     * （`derive(Clone)`；`Copy` 隐含 `Clone`）。
+     */
+    private fun derivedMethodSignature(
+        owner: StructSymbol,
+        name: String,
+    ): FunctionSignature? {
+        if (name != "clone") return null
+        val derives = owner.node.derives
+        if (derives.none { it == Derive.CLONE || it == Derive.COPY }) return null
+        return FunctionSignature(
+            paramTypes = emptyList(),
+            returnType = StructType(owner.name, owner.node),
+            selfParam = SelfParam(byReference = true, mutable = false),
+        )
+    }
+
+    /** 所有调用共用的实参检查：先比数量，再逐个定型并校验可赋值性。 */
+    private fun checkArguments(
+        args: List<ExprNode>,
+        signature: FunctionSignature,
+        span: Span,
+        what: String,
+    ) {
+        val params = signature.paramTypes
+        if (args.size != params.size) {
+            throw SemanticError(
+                span,
+                "$what expects ${params.size} argument(s), found ${args.size}",
+            )
+        }
+        for ((index, arg) in args.withIndex()) {
+            val expected = params[index]
+            val actual = check(arg, expected)
+            requireAssignable(actual, expected, arg.span, "argument ${index + 1} of $what")
+        }
+    }
+
+    /** 只用于诊断的路径文本。 */
+    private fun describePath(node: PathExprNode): String =
+        node.segments.joinToString("::") { it.name }
 
     private fun checkMethodCall(node: MethodCallExprNode): Type {
         if (node.name.genericArgs.isNotEmpty()) {

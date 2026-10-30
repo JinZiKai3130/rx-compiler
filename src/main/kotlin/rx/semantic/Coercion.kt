@@ -18,10 +18,28 @@ internal fun assignable(from: Type, to: Type): Boolean = when {
     from == NeverType -> true
     // 脚手架：尚未实现类型推导的表达式一律放行
     from == UnknownType || to == UnknownType -> true
-    // 引用：可变性只能弱化（&mut T → &T），内层继续按可赋值性递归
+    // 引用：可变性只能弱化（&mut T → &T），内层继续按可赋值性递归；
+    // 另外允许 `&Box<...Box<T>>` → `&T` 的解引用收敛（只在引用层之下发生）
     from is RefType && to is RefType ->
-        (!to.mutable || from.mutable) && assignable(from.inner, to.inner)
+        (!to.mutable || from.mutable) &&
+            (assignable(from.inner, to.inner) || boxDerefChainMatches(from.inner, to.inner))
     else -> false
+}
+
+/**
+ * 解引用收敛：沿 `Box` 逐层解引用后能否到达 [to]。
+ *
+ * - `&Box<Box<i32>>` → `&i32` ✓（连续解盒）
+ * - `&Vec<i32>` → `&i32` ✗（Vec 不参与）
+ * - `Box<i32>` → `i32` ✗（不在引用层之下，不会被调用到）
+ */
+private fun boxDerefChainMatches(from: Type, to: Type): Boolean {
+    var current = from
+    while (current is BoxType) {
+        current = current.element
+        if (assignable(current, to)) return true
+    }
+    return false
 }
 
 /** [a]、[b] 的公共类型：`!` 与 `?` 都吸收到另一侧。 */

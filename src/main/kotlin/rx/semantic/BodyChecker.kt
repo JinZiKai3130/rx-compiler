@@ -50,9 +50,8 @@ class BodyChecker(private val ctx: SemanticContext) {
 
     /**
      * [owner] 为 null = 顶层函数；非空 = impl 方法/关联函数。
-     * 方法体里允许写 `self`（
-     * [SemanticContext.currentHasSelfParam]）和 `Self`
-     * （[SemanticContext.currentSelfType]），二者都由本函数设置。
+     * 方法体里 `self` 是一个真正的局部绑定（类型来自签名：`S` / `&S` / `&mut S`），
+     * `Self` 由 [SemanticContext.currentSelfType] 指向所属 struct。
      */
     private fun checkFunctionBody(node: FnNode, owner: StructSymbol?) {
         val savedScope = ctx.currentScope
@@ -81,6 +80,21 @@ class BodyChecker(private val ctx: SemanticContext) {
                     )
                 }
             }
+
+            // `self` 也是局部绑定：类型由签名给出（S / &S / &mut S）。
+            // 可写性看**类型**（`&mut S` 的字段可写），绑定本身不可再赋值。
+            val selfParam = node.params.filterIsInstance<SelfParam>().firstOrNull()
+            if (selfParam != null && owner != null) {
+                ctx.currentScope.declareValue(
+                    LocalSymbol(
+                        name = "self",
+                        mutable = selfParam.mutable && !selfParam.byReference,
+                        type = selfValueType(selfParam, owner),
+                        span = null,
+                    )
+                )
+            }
+
             // 这里开始检查函数体，进入checkblock
             val bodyType = checkBlock(node.body, ctx.currentReturnType)
             requireAssignable(

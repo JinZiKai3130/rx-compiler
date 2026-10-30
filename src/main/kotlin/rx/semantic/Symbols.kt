@@ -78,3 +78,19 @@ class BuiltinFunctionSymbol(
     val returnType: Type,
 ) : Symbol
 
+/**
+ * `self` 的类型：`S` / `&S` / `&mut S`。
+ *
+ * 两处共用：
+ * - 方法体里的 `self` 局部绑定（[BodyChecker]）；
+ * - UFCS 形式 `Type::method(receiver, args)` 的第一个显式实参类型。
+ */
+internal fun selfValueType(selfParam: SelfParam, owner: StructSymbol): Type {
+    val selfStruct = StructType(owner.name, owner.node)
+    return if (selfParam.byReference) {
+        RefType(selfParam.mutable, selfStruct)
+    } else {
+        selfStruct
+    }
+}
+
