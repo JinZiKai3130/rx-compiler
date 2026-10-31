@@ -702,27 +702,23 @@ class ExprChecker(
         val first = callee.segments.first()
 
         if (owner == null) {                               // Box / Vec 等内建类型
-            // 先判断是否是内建类型
             val kind = (ctx.globals.lookupType(first.name) as? BuiltinTypeSymbol)?.kind
-            // 含参变量
             val element = first.genericArgs.firstOrNull()
                 ?.let { ctx.resolveType(it) } ?: UnknownType   // 缺省 → ?
-            return when {
-                // BOX::NEW
-                kind == BuiltinTypeKind.BOX && name == "new" ->
-                    FunctionSignature(listOf(element), BoxType(element), null)
-                // VEC::NEW
-                kind == BuiltinTypeKind.VEC && name == "new" ->
-                    FunctionSignature(emptyList(), VecType(element), null)
-                kind == BuiltinTypeKind.BOX || kind == BuiltinTypeKind.VEC ->
-                    null                                    // clone 等：容器方法表（后续小步）
+            val selfType = when (kind) {
+                BuiltinTypeKind.BOX -> BoxType(element)
+                BuiltinTypeKind.VEC -> VecType(element)
                 else -> throw SemanticError(
                     callee.span,
                     "primitive type '${first.name}' has no associated items",
                 )
             }
+            // new / clone / len / push / remove 共用一张内建方法表
+            return Builtins.builtinMethodSignature(selfType, name)
+                ?.let { withExplicitSelf(it, selfType) }
         }
 
+        val ownerType = StructType(owner.name, owner.node)
         val member = owner.associatedValues[name]
         if (member == null) {
             // derive 生成的方法不在 associatedValues 里，需要单独识别
@@ -731,14 +727,14 @@ class ExprChecker(
                     callee.span,
                     "no associated item '$name' in '${owner.name}'",
                 )
-            return withExplicitSelf(derived, owner)
+            return withExplicitSelf(derived, ownerType)
         }
 
         return when (member) {
             is FunctionSymbol -> withExplicitSelf(
                 member.signature
                     ?: throw SemanticError(callee.span, "'$name' has no signature"),
-                owner,
+                ownerType,
             )
             else -> throw SemanticError(callee.span, "'$name' is not callable")
         }
@@ -750,11 +746,16 @@ class ExprChecker(
      */
     private fun withExplicitSelf(
         signature: FunctionSignature,
-        owner: StructSymbol,
+        selfType: Type,
     ): FunctionSignature {
         val selfParam = signature.selfParam ?: return signature
+        val explicit = if (selfParam.byReference) {
+            RefType(selfParam.mutable, selfType)
+        } else {
+            selfType
+        }
         return FunctionSignature(
-            paramTypes = listOf(selfValueType(selfParam, owner)) + signature.paramTypes,
+            paramTypes = listOf(explicit) + signature.paramTypes,
             returnType = signature.returnType,
             selfParam = null,                    // 已摊进 paramTypes
         )
@@ -805,35 +806,139 @@ class ExprChecker(
 
     private fun checkMethodCall(node: MethodCallExprNode): Type {
         if (node.name.genericArgs.isNotEmpty()) {
+            throw SemanticError(node.span, "method segments have no type parameters")
+        }
+
+        // 一次遍历：类型 + place（&mut self 判定要用）
+        val place = checkPlace(node.receiver)
+        val receiverType = node.receiver.type!!
+
+        val signature = resolveMethod(receiverType, node.name.name, node.span)
+            ?: run {
+                for (arg in node.args) check(arg)        // 脚手架：只检查实参
+                return UnknownType
+            }
+
+        val selfParam = signature.selfParam
+            ?: throw SemanticError(node.span, "'${node.name.name}' is not a method")
+
+        if (selfParam.byReference && selfParam.mutable &&
+            !hasMutableAccess(receiverType, place)
+        ) {
             throw SemanticError(
-                node.span,
-                "method segments have no type parameters",
+                node.receiver.span,
+                "method '${node.name.name}' requires mutable access",
             )
         }
 
-        check(node.receiver)
-        for (arg in node.args) check(arg)
-        return UnknownType           // 方法查找与返回类型：批次 D
+        checkArguments(node.args, signature, node.span, "method '${node.name.name}'")
+        return signature.returnType
+    }
+
+    private fun resolveMethod(
+        receiverType: Type,
+        name: String,
+        span: Span,
+    ): FunctionSignature? {
+        var current: Type = receiverType
+        var sharedRef: RefType? = null       // 走过的共享引用，clone 兜底要用
+
+        while (true) {
+            when (current) {
+                UnknownType -> return null                       // 脚手架：整体 ?
+                is RefType -> {
+                    if (!current.mutable) sharedRef = current
+                    current = current.inner                      // autoref 的 deref 部分
+                }
+                is StructType -> {
+                    val owner = ctx.globals.lookupType(current.name) as? StructSymbol
+                        ?: return null
+                    structMethodSignature(owner, name, span)?.let { return it }
+                    break                                        // 没找到 → 走 clone 兜底
+                }
+                is VecType, is BoxType -> {
+                    val found = Builtins.builtinMethodSignature(current, name)
+                    if (found != null) {
+                        if (found.selfParam == null) {
+                            throw SemanticError(span, "'$name' is not a method")
+                        }
+                        return found
+                    }
+                    if (current is BoxType) {
+                        current = current.element                // Box 可以再解一层
+                    } else {
+                        break                                    // Vec 不可解引用
+                    }
+                }
+                is ArrayType -> {
+                    // 数组只有 len（元素能力检查留给批次 F）
+                    if (name == "len") {
+                        return FunctionSignature(emptyList(), UsizeType, SHARED_SELF)
+                    }
+                    break
+                }
+                else -> break
+            }
+        }
+
+        // clone 兜底：标量 / 数组是 Copy；共享引用本身也可克隆
+        if (name == "clone") {
+            if (current is IntegerType || current == BoolType || current is ArrayType) {
+                return FunctionSignature(emptyList(), current, SHARED_SELF)
+            }
+            sharedRef?.let { return FunctionSignature(emptyList(), it, SHARED_SELF) }
+        }
+        throw SemanticError(span, "type '$receiverType' has no method '$name'")
+    }
+
+    private fun structMethodSignature(
+        owner: StructSymbol,
+        name: String,
+        span: Span,
+    ): FunctionSignature? {
+        val member = owner.associatedValues[name]
+        val signature = when (member) {
+            is FunctionSymbol -> member.signature ?: return null
+            null -> derivedMethodSignature(owner, name) ?: return null   // derive 生成
+            else -> return null                                          // 常量不是方法
+        }
+        if (signature.selfParam == null) {
+            throw SemanticError(span, "'$name' is not a method")          // 关联函数不能点调用
+        }
+        return signature
+    }
+
+    private fun hasMutableAccess(type: Type, place: Place?): Boolean {
+        var current = type
+        var throughRef = false
+        while (current is RefType) {
+            if (!current.mutable) return false
+            if (place?.underShared == true) return false
+            throughRef = true
+            current = current.inner
+        }
+        return if (throughRef) true else (place?.mutable ?: true)
     }
 
     private fun checkStructLitExpr(node: StructLitNode): Type {
         val name = node.path.lastOrNull()
             ?: throw SemanticError(node.span, "empty struct path")
 
-        if (name == "Self") {
-            if (ctx.currentSelfType == null) {
-                throw SemanticError(node.span, "`Self` is not allowed here")
-            }
+        val symbol: StructSymbol = if (name == "Self") {
+            ctx.currentSelfType
+                ?: throw SemanticError(node.span, "`Self` is not allowed here")
         } else {
-            val symbol = ctx.currentScope.lookupType(name)
-            if (symbol !is StructSymbol) {
+            val looked = ctx.currentScope.lookupType(name)
+            if (looked !is StructSymbol) {
                 throw SemanticError(node.span, "unresolved struct type '$name'")
             }
+            looked
         }
 
         for (field in node.fields) {
             check(field.value)
         }
-        return UnknownType           // 结构体字面量类型：批次 E
+        // 字段类型与缺失/多余字段的校验是批次 E；这里先把名义类型定下来
+        return StructType(symbol.name, symbol.node)
     }
 }
