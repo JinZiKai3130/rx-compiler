@@ -286,7 +286,21 @@ class ExprChecker(
                 "equality operands must have the same type: $left vs $right",
             )
         }
+        requireEquatable(left, node.span)
         return BoolType
+    }
+
+    /**
+     * `==` / `!=` 的能力检查：引用比地址，不需要被指类型实现 PartialEq；
+     * 其余类型按 [supportsPartialEq] 递归（容器看元素，结构体看 derive）。
+     */
+    private fun requireEquatable(type: Type, span: Span) {
+        if (!supportsPartialEq(type)) {
+            throw SemanticError(
+                span,
+                "equality requires PartialEq, but '$type' does not implement it",
+            )
+        }
     }
 
     private fun checkOrdering(node: BinaryExprNode, expected: Type?): Type {
@@ -808,8 +822,11 @@ class ExprChecker(
                 )
             }
             // new / clone / len / push / remove 共用一张内建方法表
-            return Builtins.builtinMethodSignature(selfType, name)
-                ?.let { withExplicitSelf(it, selfType) }
+            val signature = Builtins.builtinMethodSignature(selfType, name)
+                ?: return null
+            // 容器的 clone 要求元素 Clone（空容器也一样）
+            if (name == "clone") requireCloneable(selfType, callee.span)
+            return withExplicitSelf(signature, selfType)
         }
 
         val ownerType = StructType(owner.name, owner.node)
@@ -996,6 +1013,8 @@ class ExprChecker(
                         if (found.selfParam == null) {
                             throw SemanticError(span, "'$name' is not a method")
                         }
+                        // 容器的 clone 要求元素 Clone（空容器也一样）
+                        if (name == "clone") requireCloneable(current, span)
                         return found
                     }
                     if (current is BoxType) {
@@ -1018,11 +1037,23 @@ class ExprChecker(
         // clone 兜底：标量 / 数组是 Copy；共享引用本身也可克隆
         if (name == "clone") {
             if (current is IntegerType || current == BoolType || current is ArrayType) {
+                requireCloneable(current, span)          // 数组要求元素 Clone
                 return FunctionSignature(emptyList(), current, SHARED_SELF)
             }
+            // 引用复制：被指向的类型可不可 clone 与此无关，直接豁免能力检查
             sharedRef?.let { return FunctionSignature(emptyList(), it, SHARED_SELF) }
         }
         throw SemanticError(span, "type '$receiverType' has no method '$name'")
+    }
+
+    /** 内建容器 / 数组的 `clone` 要求元素 Clone（空容器也一样）。 */
+    private fun requireCloneable(type: Type, span: Span) {
+        if (!supportsClone(type)) {
+            throw SemanticError(
+                span,
+                "clone requires Clone, but '$type' does not implement it",
+            )
+        }
     }
 
     private fun structMethodSignature(

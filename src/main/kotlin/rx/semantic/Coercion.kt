@@ -18,11 +18,15 @@ internal fun assignable(from: Type, to: Type): Boolean = when {
     from == NeverType -> true
     // 脚手架：尚未实现类型推导的表达式一律放行
     from == UnknownType || to == UnknownType -> true
-    // 引用：可变性只能弱化（&mut T → &T），内层继续按可赋值性递归；
-    // 另外允许 `&Box<...Box<T>>` → `&T` 的解引用收敛（只在引用层之下发生）
+    // 引用：可变性只能在**最外层**弱化（&mut T → &T）；一旦进入被指向的类型，
+    // 就必须完全相同——否则 `&mut &mut i32` 会被悄悄改写成 `&mut &i32`
+    // （rej-inner-reference-mutability-is-not-rewritten）。
+    // 唯一允许的“内层例外”是 `&Box<...Box<T>>` → `&T` 的解引用收敛。
     from is RefType && to is RefType ->
         (!to.mutable || from.mutable) &&
-            (assignable(from.inner, to.inner) || boxDerefChainMatches(from.inner, to.inner))
+            (from.inner == to.inner ||
+                from.inner == UnknownType || to.inner == UnknownType ||
+                boxDerefChainMatches(from.inner, to.inner))
     else -> false
 }
 
@@ -74,20 +78,4 @@ internal fun stripSharedRef(type: Type, span: Span, what: String): Type = when {
     type is RefType && !type.mutable -> type.inner
     type is RefType -> throw SemanticError(span, "$what does not accept a mutable reference")
     else -> type
-}
-
-/**
- * 能否在**不调用 clone** 的情况下按位复制。
- *
- * 目前只被 `[e; n]`（n > 1）使用：同一个值要出现 n 次，就必须能复制。
- * 注意 `&mut T` **不是** Copy（复制会让同一块内存出现两个可变路径），
- * `&T` 是 Copy；结构体只有显式 `#[derive(Copy)]` 才是。
- */
-internal fun isCopy(type: Type): Boolean = when (type) {
-    is IntegerType, BoolType, UnitType -> true
-    UnknownType -> true                       // 脚手架通配，不误伤
-    is RefType -> !type.mutable
-    is ArrayType -> isCopy(type.element)
-    is StructType -> type.decl?.derives?.any { it == Derive.COPY } ?: false
-    else -> false                             // Box / Vec / Never
 }
