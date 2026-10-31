@@ -149,6 +149,8 @@ class BodyChecker(private val ctx: SemanticContext) {
                         "let initializer",
                     )
                 }
+                // 只读位置上的 `&mut` 不能被搬进新变量（只能重借用成 `&T`）
+                exprs.requireMovable(stmt.initializer, declared, initType, "let initializer")
                 ctx.currentScope.defineLocal(
                     LocalSymbol(
                         name = stmt.name,

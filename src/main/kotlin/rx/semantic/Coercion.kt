@@ -75,3 +75,19 @@ internal fun stripSharedRef(type: Type, span: Span, what: String): Type = when {
     type is RefType -> throw SemanticError(span, "$what does not accept a mutable reference")
     else -> type
 }
+
+/**
+ * 能否在**不调用 clone** 的情况下按位复制。
+ *
+ * 目前只被 `[e; n]`（n > 1）使用：同一个值要出现 n 次，就必须能复制。
+ * 注意 `&mut T` **不是** Copy（复制会让同一块内存出现两个可变路径），
+ * `&T` 是 Copy；结构体只有显式 `#[derive(Copy)]` 才是。
+ */
+internal fun isCopy(type: Type): Boolean = when (type) {
+    is IntegerType, BoolType, UnitType -> true
+    UnknownType -> true                       // 脚手架通配，不误伤
+    is RefType -> !type.mutable
+    is ArrayType -> isCopy(type.element)
+    is StructType -> type.decl?.derives?.any { it == Derive.COPY } ?: false
+    else -> false                             // Box / Vec / Never
+}

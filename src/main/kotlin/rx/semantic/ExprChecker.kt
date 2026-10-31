@@ -46,18 +46,11 @@ class ExprChecker(
             is UnaryExprNode -> checkUnary(expr)
             is ReferenceExprNode -> checkReference(expr)
             is BinaryExprNode -> checkBinary(expr, expected)
-            is FieldExprNode -> { check(expr.receiver); UnknownType }
-            is IndexExprNode -> { check(expr.receiver); check(expr.index); UnknownType }
+            is FieldExprNode -> placeOfField(expr).type
+            is IndexExprNode -> placeOfIndex(expr).type
             is MethodCallExprNode -> checkMethodCall(expr)
             is CastExprNode -> checkCast(expr)
-            is ArrayLitNode -> {
-                for (element in expr.elements) check(element)
-                expr.repeat?.let {
-                    check(it.element)
-                    ctx.constEval.requireUsize(it.length)
-                }
-                UnknownType
-            }
+            is ArrayLitNode -> checkArrayLit(expr, expected)
 
             // 不可达：ExprNode 不是 sealed，编译器要求一个 else
             else -> UnknownType
@@ -471,31 +464,132 @@ class ExprChecker(
         return place
     }
 
-    private fun projectionPlace(base: Place?, baseType: Type): Place {
-        val writable = when {
-            baseType == UnknownType -> true
-            baseType is RefType -> baseType.mutable && !(base?.underShared ?: false)
-            else -> base?.mutable ?: true
+    /** 脚手架：接收者类型未知时，整条投影链保持"未知但可写"，避免误报。 */
+    private fun unknownPlace(): Place =
+        Place(UnknownType, mutable = true, underShared = false)
+
+    /**
+     * 投影的共同第一步：剥掉接收者类型外层的引用，得到"容器本身"与
+     * "到达容器时手里的权限"。引用层会**覆盖**继承来的权限：
+     *
+     *   `&T`     → 只读，并且毒化后续（里面的 `&mut` 是假的）
+     *   `&mut T` → 可写（绑定是不是 `mut` 无关：`let r: &mut T` 也能写）
+     *
+     * 返回 (容器类型, 容器位置的 Place)；容器类型是 `?` 时第二个元素无意义。
+     */
+    private fun containerPlace(base: Place?, baseType: Type): Pair<Type, Place?> {
+        var type = baseType
+        var place = base
+        while (true) {
+            when (type) {
+                is RefType -> {
+                    val inherited = place?.underShared ?: false
+                    place = Place(
+                        type = type.inner,
+                        mutable = type.mutable && !inherited,
+                        underShared = inherited || !type.mutable,
+                    )
+                    type = type.inner
+                }
+
+                is BoxType -> {
+                    // `*Box` 也是拥有权下移：`values[0]` 里的 `values: Box<Vec<T>>`
+                    // 等价于对盒子内容取下标，权限照抄盒子本身，不毒化。
+                    place = Place(
+                        type = type.element,
+                        mutable = place?.mutable ?: true,
+                        underShared = place?.underShared ?: false,
+                    )
+                    type = type.element
+                }
+
+                else -> return type to place
+            }
         }
+    }
+
+    /**
+     * 拥有权直接下移的投影（struct 字段 / 数组元素 / `*Box`）：
+     * 里面的东西本来就是你的，所以权限原样继承，**不**毒化后续。
+     *
+     * 这就是 `fn f(values: [&mut i32; 1]) { *values[0] = 2; }` 合法、
+     * 而 `fn f(values: Vec<&mut i32>) { *values[0] = 2; }` 非法的差别来源。
+     */
+    private fun ownedProjection(type: Type, container: Place?): Place = Place(
+        type = type,
+        // base == null：接收者是临时值（`make().field`），归我们所有 → 可写
+        mutable = container?.mutable ?: true,
+        underShared = container?.underShared ?: false,
+    )
+
+    /**
+     * 借用型投影（Vec 元素）：元素是"借"出来的，要碰它就得先能可变地借到
+     * 容器本身。容器只读时，元素位置只读，且其中的 `&mut` 一并失效。
+     */
+    private fun borrowingProjection(type: Type, container: Place?): Place {
+        val writable = container?.mutable ?: true
         return Place(
-            type = UnknownType,                        // 批次 E 换成真实字段/元素类型
+            type = type,
             mutable = writable,
-            // 只读路径上的 &mut 是"假的"：批次 E 靠它拒绝 Vec<&mut T> 的穿透写入
-            underShared = (base?.underShared ?: false) || !writable,
+            underShared = (container?.underShared ?: false) || !writable,
         )
     }
 
-    private fun placeOfField(node: FieldExprNode): Place? {
-        val base = checkPlace(node.receiver)
-        node.type = UnknownType
-        return projectionPlace(base, node.receiver.type!!)
+    private fun placeOfField(node: FieldExprNode): Place {
+        val base = checkPlace(node.receiver)          // ← 权限在这一行接到链上
+        val (containerType, container) = containerPlace(base, node.receiver.type!!)
+
+        val fieldType = when (containerType) {
+            UnknownType -> UnknownType
+            is StructType -> {
+                val owner = ctx.globals.lookupType(containerType.name) as? StructSymbol
+                    ?: throw SemanticError(
+                        node.span,
+                        "unresolved struct type '${containerType.name}'",
+                    )
+                owner.fields[node.name]
+                    ?: throw SemanticError(
+                        node.span,
+                        "struct '${containerType.name}' has no field '${node.name}'",
+                    )
+            }
+
+            else -> throw SemanticError(node.span, "type '$containerType' has no fields")
+        }
+
+        node.type = fieldType
+        if (containerType == UnknownType) return unknownPlace()
+
+        // 字段是拥有权下移的投影：可写性照抄容器，毒化状态也不变
+        return ownedProjection(fieldType, container)
     }
 
-    private fun placeOfIndex(node: IndexExprNode): Place? {
+    private fun placeOfIndex(node: IndexExprNode): Place {
         val base = checkPlace(node.receiver)
-        check(node.index)
-        node.type = UnknownType
-        return projectionPlace(base, node.receiver.type!!)
+        val (containerType, container) = containerPlace(base, node.receiver.type!!)
+
+        // 下标恒为 usize；传 expected，让无后缀字面量（a[0]）直接定成 usize
+        // 下标类型检查
+        val indexType = check(node.index, UsizeType)
+        if (indexType != UnknownType && indexType != UsizeType) {
+            throw SemanticError(node.index.span, "index must be usize, found $indexType")
+        }
+
+        // 数组中元素类型
+        val elementType = when (containerType) {
+            UnknownType -> UnknownType
+            is ArrayType -> containerType.element
+            is VecType -> containerType.element
+            else -> throw SemanticError(node.span, "type '$containerType' is not indexable")
+        }
+        node.type = elementType
+
+        // 返回container的类型，vec和[]不同
+        return when (containerType) {
+            UnknownType -> unknownPlace()
+            is ArrayType -> ownedProjection(elementType, container)     // 数组：直接投影
+            else -> borrowingProjection(elementType, container)         // Vec：借用投影
+        }
     }
 
     private fun checkPathExpr(node: PathExprNode): Type {
@@ -797,6 +891,46 @@ class ExprChecker(
             val expected = params[index]
             val actual = check(arg, expected)
             requireAssignable(actual, expected, arg.span, "argument ${index + 1} of $what")
+            requireMovable(arg, expected, actual, "argument ${index + 1} of $what")
+        }
+    }
+
+    /** 只有这几种语法形式能构成 place（`*p` 单独算一种）。 */
+    private fun isPlaceShaped(expr: ExprNode): Boolean = when (expr) {
+        is PathExprNode, is FieldExprNode, is IndexExprNode -> true
+        is UnaryExprNode -> expr.op == UnOp.DEREF
+        else -> false
+    }
+
+    /**
+     * 值被**搬走**时的权限检查（实参传递 / let 初始化）。
+     *
+     * 只读位置里放着的 `&mut T` 不是你的（[Place.underShared]），它只能被
+     * 重借用成 `&T` 交出去；原样传给 `&mut T` 形参、或原样初始化 `&mut T`
+     * 变量，等于把那个 `&mut` 整体搬迁，需要可变权限。
+     *
+     * rej_example
+     * let mut value = String::from("hello");
+        let mut_ref = &mut value;
+        let moved = *mut_ref;
+        // 这里默认移动语义，导致value变成空，然后mut_ref指向空
+
+     * 对照：
+     *   `fn f(values: Vec<&mut i32>) { write(values[0]); }`      → 拒绝
+     *   `fn f(values: [&mut i32; 1]) { write(values[0]); }`      → 允许（拥有权下移）
+     *   `fn f(v: Vec<&mut C>) { let s: &C = v[0]; }`             → 允许（重借用为共享）
+     */
+    fun requireMovable(expr: ExprNode, expected: Type?, type: Type, what: String) {
+        if (type !is RefType || !type.mutable) return          // 只有 `&mut` 会被搬走
+        if (expected is RefType && !expected.mutable) return   // `&mut` → `&`：重借用，合法
+        if (!isPlaceShaped(expr)) return                       // 普通右值：没有位置权限问题
+
+        val place = checkPlace(expr) ?: return
+        if (place.underShared) {
+            throw SemanticError(
+                expr.span,
+                "$what cannot move a mutable reference out of a read-only place",
+            )
         }
     }
 
@@ -935,10 +1069,82 @@ class ExprChecker(
             looked
         }
 
+        val seen = HashSet<String>()
         for (field in node.fields) {
-            check(field.value)
+            // ① 字段必须存在
+            val declared = symbol.fields[field.name]
+                ?: throw SemanticError(
+                    field.value.span,
+                    "struct '${symbol.name}' has no field '${field.name}'",
+                )
+            // ② 同名字段不能写两次
+            if (!seen.add(field.name)) {
+                throw SemanticError(
+                    field.value.span,
+                    "duplicate field '${field.name}' in '${symbol.name}'",
+                )
+            }
+            // ③ 字段类型必须匹配（declared 当 expected，正好给字面量定型）
+            val actual = check(field.value, declared)     // declared 当 expected，字面量才好定型
+            requireAssignable(actual, declared, field.value.span, "field '${field.name}'")
         }
-        // 字段类型与缺失/多余字段的校验是批次 E；这里先把名义类型定下来
+
+        // 少了字段就是非法初始化（本语言没有 ..Default 之类的语法）
+        val missing = symbol.fields.keys - seen
+        if (missing.isNotEmpty()) {
+            throw SemanticError(
+                node.span,
+                "missing field(s) ${missing.joinToString { "'$it'" }} in '${symbol.name}'",
+            )
+        }
+
         return StructType(symbol.name, symbol.node)
+    }
+
+    /**
+     * 数组字面量。两种形式：
+     *
+     *   `[a, b, c]` → 元素取公共类型（[join]），长度 = 元素个数；
+     *   `[e; n]`    → 同值重复 n 次，n > 1 时要求元素可以 Copy。
+     *
+     * 有 `[T; N]` 期望类型时，用它给元素定型（`1` 才能变成 `usize`），
+     * 并校验元素个数——这就是形状比较的位点。
+     */
+    private fun checkArrayLit(node: ArrayLitNode, expected: Type?): Type {
+        val expectedArray = expected as? ArrayType
+
+        val repeat = node.repeat
+        if (repeat != null) { // 第一种形式，用重复的方式定义
+            val length = ctx.constEval.requireUsize(repeat.length)
+            val hint = expectedArray?.takeIf { it.length == length }?.element
+            val elementType = check(repeat.element, hint)
+
+            // 如果这个数组长度大于一，要求赋值，则要满足isCopy否则直接throw
+            if (length > 1 && !isCopy(elementType)) {
+                throw SemanticError(
+                    node.span,
+                    "repeating an array more than once requires a Copy element type, found $elementType",
+                )
+            }
+            return ArrayType(elementType, length)
+        }
+        
+        // 第二种形式，无重复
+        var elementType: Type? = null
+        for (element in node.elements) { // 内部element类型要求统一
+            val type = check(element, expectedArray?.element)
+            elementType = elementType
+                ?.let { join(it, type, element.span, "array elements") }
+                ?: type
+        }
+
+        val length = node.elements.size.toLong()
+        if (expectedArray != null && expectedArray.length != length) {
+            throw SemanticError(
+                node.span,
+                "array literal has $length element(s), expected ${expectedArray.length}",
+            )
+        }
+        return ArrayType(elementType ?: UnknownType, length)
     }
 }
