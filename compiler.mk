@@ -12,18 +12,34 @@ ANTLR_JAR  ?= $(HOME)/tools/antlr/antlr-4.13.2-complete.jar
 ANTLR4     ?= antlr4
 JAVAC      ?= javac
 KOTLINC    ?= kotlinc
+MVN        ?= mvn
 
 KOTLIN_SRC := $(shell find src/main/kotlin -name '*.kt' 2>/dev/null)
 GEN_DIR    := build/antlr-src
 JAVA_OUT   := build/classes
 KOTLIN_OUT := build/kotlin-classes
 
-.PHONY: compiler compiler-clean maven-parser
+.PHONY: compiler compiler-clean maven-parser dist
 
 # Build the whole compiler and the ./scripts/rxc launcher.
 compiler: $(KOTLIN_OUT)/.built scripts/rxc
 	@chmod +x scripts/rxc
 	@echo "[compiler] built; run: ./scripts/rxc <file.rx>"
+
+# Build the distribution committed for the online judge. The judge's dependency
+# preparation is limited to 180 s, which is not enough to download the Kotlin
+# compiler from Maven Central, so the judge runs this prebuilt jar directly
+# (see .rx-oj.toml and config.mk). Rerun and commit dist/ after source changes:
+#   make dist
+#   git add dist && git commit ... && git push
+# Pass MVN=/path/to/mvn if Maven is not on PATH.
+dist:
+	$(MVN) -B -ntp -DskipTests package
+	rm -rf dist
+	mkdir -p dist/lib
+	cp target/rxc.jar dist/
+	cp target/lib/*.jar dist/lib/
+	@echo "[compiler] dist ready; commit dist/ with your changes"
 
 # The online judge builds with Maven (pom.xml), which has no ANTLR tool and
 # therefore compiles the generated parser sources committed in

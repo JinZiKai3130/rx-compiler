@@ -1,0 +1,6 @@
+# The compiler is submitted as the prebuilt distribution in dist/ (see
+# compiler.mk `make dist`). Downloading the Kotlin compiler with Maven exceeds
+# the judge's 180-second dependency-preparation limit, so preparation is
+# disabled and BUILD only validates the runtime.
+[dependencies]
+enabled = false
