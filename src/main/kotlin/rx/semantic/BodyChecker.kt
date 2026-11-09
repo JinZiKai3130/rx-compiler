@@ -117,17 +117,24 @@ class BodyChecker(private val ctx: SemanticContext) {
         ctx.currentScope = savedScope.child()
 
         try {
-            // 发散只决定"没有尾表达式"时的块类型。
-            // 有尾表达式时，块类型就是尾表达式的类型——即使前面的语句已经发散：
-            // 不可达的尾表达式同样参与类型检查（unreachable-checks）。
+            // 有尾表达式时，块类型由尾表达式决定——即使前面的语句已经发散
+            // （不可达的尾表达式仍要做类型检查，unreachable-checks）。
+            // 没有尾表达式时：发散 ⇒ !，否则 ⇒ ()。
+            // 两种情况都要把“是否发散”记录到 block.diverges：
+            // `{ loop {}; 42 }` 的类型是 i32，但它仍然是发散表达式。
             var diverges = false
             for (stmt in block.statements) {
                 if (checkStatement(stmt)) diverges = true
             }
 
             val tail = block.tail
-            if (tail != null) return exprs.check(tail, expected)
+            if (tail != null) {
+                val tailType = exprs.check(tail, expected)
+                block.diverges = diverges || tail.diverges
+                return tailType
+            }
 
+            block.diverges = diverges
             return if (diverges) NeverType else UnitType
         } finally {
             ctx.currentScope = savedScope
@@ -159,7 +166,8 @@ class BodyChecker(private val ctx: SemanticContext) {
                         span = stmt.span,
                     )
                 )
-                return false
+                // 初始化器发散（如 `let x = loop {};`）会让后面的语句不可达。
+                return initType == NeverType || stmt.initializer.diverges
             }
 
             is ExprStmtNode -> {
@@ -169,7 +177,9 @@ class BodyChecker(private val ctx: SemanticContext) {
                 if (!stmt.hasSemicolon) {
                     requireAssignable(type, UnitType, stmt.span, "block statement")
                 }
-                return type == NeverType
+                // 发散不等于类型为 !：`{ loop {}; 42 };` 的类型是 i32，
+                // 但它发散，所以外层块的后续代码同样不可达。
+                return type == NeverType || stmt.expr.diverges
             }
 
             else -> return false

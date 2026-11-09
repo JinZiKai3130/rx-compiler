@@ -28,6 +28,15 @@ abstract class StmtNode(span: Span) : AstNode(span)
 abstract class ExprNode(span: Span) : AstNode(span) {
     /** 语义阶段（2.5）填入的类型；2.4 阶段保持为 null。 */
     var type: Type? = null
+
+    /**
+     * 这个表达式是否发散（永远不会正常执行完）。
+     *
+     * 注意它和类型是两件事：`{ loop {}; 42 }` 的类型是 i32，但它发散。
+     * 规范：块有尾表达式时由尾表达式定型（即使前面的语句已经发散）；
+     * 没有尾表达式时，发散 ⇒ `!`，否则 ⇒ `()`。
+     */
+    var diverges: Boolean = false
 }
 
 /** 类型族：源码里"写出来的类型"（i32、&mut S、[i32; 3]、()），与内部类型 Type 分开。 */

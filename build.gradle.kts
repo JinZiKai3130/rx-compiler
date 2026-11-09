@@ -26,79 +26,20 @@ kotlin {
 }
 
 // --- ANTLR sources for the IDE ------------------------------------------------
-// compiler.mk renames Lexer.g4/Parser.g4 to RxLexer.g4/RxParser.g4 (the ANTLR
-// runtime already owns the plain names). Do the same here so the Gradle model is
-// self-contained and does not depend on build/antlr-src from a previous make run.
-// Generated Java goes to .../antlr/main/rx/gen so that the package declaration
-// matches the directory layout (Eclipse JDT / redhat.java requires this).
-
-val grammarDir = layout.buildDirectory.dir("grammar")
-val generatedJavaRoot = layout.buildDirectory.dir("generated-src/antlr/main")
-val generatedJavaPackage = layout.buildDirectory.dir("generated-src/antlr/main/rx/gen")
-
-val antlrTool: Configuration by configurations.creating
+// The generated parser lives in src/main/java/rx/gen and is committed so that
+// Maven can build without the ANTLR tool (see pom.xml). compiler.mk still
+// regenerates it from grammar/ for the make build; after changing a grammar,
+// run `make compiler` and copy the six build/antlr-src/*.java files into
+// src/main/java/rx/gen.
 
 dependencies {
-    antlrTool("org.antlr:antlr4:4.13.2")
     implementation("org.antlr:antlr4-runtime:4.13.2")
-}
-
-val prepareGrammar by tasks.registering {
-    val outDir = grammarDir.get().asFile
-    outputs.dir(outDir)
-    doLast {
-        outDir.mkdirs()
-        val lexer = file("grammar/Lexer.g4").readText()
-            .replace("lexer grammar Lexer;", "lexer grammar RxLexer;")
-        File(outDir, "RxLexer.g4").writeText(lexer)
-
-        val parser = file("grammar/Parser.g4").readText()
-            .replace("parser grammar Parser;", "parser grammar RxParser;")
-            .replace("tokenVocab=Lexer;", "tokenVocab=RxLexer;")
-        File(outDir, "RxParser.g4").writeText(parser)
-    }
-}
-
-val generateLexer by tasks.registering(JavaExec::class) {
-    dependsOn(prepareGrammar)
-    classpath = antlrTool
-    mainClass.set("org.antlr.v4.Tool")
-    inputs.dir(grammarDir)
-    outputs.dir(generatedJavaRoot)
-    doFirst { generatedJavaPackage.get().asFile.mkdirs() }
-    args(
-        "-visitor",
-        "-package", "rx.gen",
-        "-o", generatedJavaPackage.get().asFile.absolutePath,
-        "-lib", grammarDir.get().asFile.absolutePath,
-        grammarDir.get().asFile.resolve("RxLexer.g4").absolutePath,
-    )
-}
-
-val generateParser by tasks.registering(JavaExec::class) {
-    dependsOn(generateLexer)
-    classpath = antlrTool
-    mainClass.set("org.antlr.v4.Tool")
-    inputs.dir(grammarDir)
-    outputs.dir(generatedJavaRoot)
-    doFirst { generatedJavaPackage.get().asFile.mkdirs() }
-    args(
-        "-visitor",
-        "-package", "rx.gen",
-        "-o", generatedJavaPackage.get().asFile.absolutePath,
-        // The lexer run wrote RxLexer.tokens into the package output dir.
-        "-lib", generatedJavaPackage.get().asFile.absolutePath,
-        grammarDir.get().asFile.resolve("RxParser.g4").absolutePath,
-    )
 }
 
 sourceSets {
     main {
         kotlin.srcDir("src/main/kotlin")
-        java.srcDir(generatedJavaRoot)
+        // Generated parser sources are regular Java under src/main/java.
+        java.srcDir("src/main/java")
     }
-}
-
-tasks.compileKotlin {
-    dependsOn(generateParser)
 }

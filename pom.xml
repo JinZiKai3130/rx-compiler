@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven build for the online judge (and any machine without kotlinc/antlr4).
+
+  The local development build stays in compiler.mk (`make compiler`) and uses
+  the kotlinc/ANTLR installation from PATH. This POM is used by the online
+  judge's Java 21 image, which has Maven but no kotlinc or ANTLR:
+
+    mvn -B -ntp -DskipTests package
+    java -cp 'target/rxc.jar:target/lib/*' rx.MainKt <rxc arguments> file.rx
+
+  The ANTLR-generated parser sources are committed under src/main/java/rx/gen
+  so the build does not need the ANTLR tool and its ICU dependency. After
+  changing grammar/, regenerate them with `make compiler` and sync the six
+  files from build/antlr-src into src/main/java/rx/gen (see compiler.mk).
+
+  `make test` in the judge sandbox is offline. Every dependency and plugin
+  version below must stay pinned so `mvn dependency:go-offline` can populate
+  the local repository before the offline build.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>rx</groupId>
+    <artifactId>rx-compiler</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>Rx compiler</name>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>21</maven.compiler.release>
+        <kotlin.version>2.1.0</kotlin.version>
+        <antlr.version>4.13.2</antlr.version>
+        <!-- Compile in the Maven JVM: one short offline build, no daemon jar. -->
+        <kotlin.compiler.execution.strategy>in-process</kotlin.compiler.execution.strategy>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-stdlib</artifactId>
+            <version>${kotlin.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.antlr</groupId>
+            <artifactId>antlr4-runtime</artifactId>
+            <version>${antlr.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>rxc</finalName>
+        <plugins>
+            <!-- Compile the committed rx.gen Java sources (default-compile). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
+
+            <!--
+              Pin the default-lifecycle plugins. `dependency:go-offline`
+              resolves every plugin of the lifecycle, so newer versions can
+              pull large extra transitives and exceed the judge's 128 MiB
+              dependency snapshot limit.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>2.22.2</version>
+            </plugin>
+
+            <!--
+              Kotlin sources reference the generated rx.gen.* classes, so they
+              compile after Java, in process-classes. target/classes is part of
+              the compile classpath Maven hands to kotlinc.
+            -->
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <version>${kotlin.version}</version>
+                <executions>
+                    <execution>
+                        <id>compile-kotlin</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                        <configuration>
+                            <sourceDirs>
+                                <sourceDir>${project.basedir}/src/main/kotlin</sourceDir>
+                            </sourceDirs>
+                            <jvmTarget>21</jvmTarget>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              Copy kotlin-stdlib and antlr4-runtime next to the jar. The judge
+              launch command puts target/rxc.jar and target/lib/* on the
+              classpath. This is deliberately not a shaded uber-jar: the shade
+              plugin pulls plexus-archiver/zstd/ICU transitives that would push
+              the judge's dependency snapshot over its 128 MiB limit.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-runtime-dependencies</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                            <includeScope>runtime</includeScope>
+                            <overWriteReleases>true</overWriteReleases>
+                            <overWriteSnapshots>true</overWriteSnapshots>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

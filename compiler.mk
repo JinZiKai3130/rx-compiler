@@ -18,12 +18,20 @@ GEN_DIR    := build/antlr-src
 JAVA_OUT   := build/classes
 KOTLIN_OUT := build/kotlin-classes
 
-.PHONY: compiler compiler-clean
+.PHONY: compiler compiler-clean maven-parser
 
 # Build the whole compiler and the ./scripts/rxc launcher.
 compiler: $(KOTLIN_OUT)/.built scripts/rxc
 	@chmod +x scripts/rxc
 	@echo "[compiler] built; run: ./scripts/rxc <file.rx>"
+
+# The online judge builds with Maven (pom.xml), which has no ANTLR tool and
+# therefore compiles the generated parser sources committed in
+# src/main/java/rx/gen. Run this after changing grammar/ so both builds agree.
+maven-parser: $(JAVA_OUT)/.built
+	@mkdir -p src/main/java/rx/gen
+	cp $(GEN_DIR)/*.java src/main/java/rx/gen/
+	@echo "[compiler] synced generated parser to src/main/java/rx/gen"
 
 # 1) grammar copies with clash-free names
 $(GEN_DIR)/RxLexer.g4: grammar/Lexer.g4

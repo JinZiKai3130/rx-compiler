@@ -57,6 +57,25 @@ class ExprChecker(
         }
 
         expr.type = type
+        // 发散性与类型分开计算（规范：发散表达式不一定是 !，例如 { loop {}; 42 }）。
+        expr.diverges = when (expr) {
+            // 这几个节点在各自的 check 函数里已经算好。
+            is BlockExprNode, is IfExprNode, is WhileExprNode, is LoopExprNode -> expr.diverges
+            is ReturnExprNode, is BreakExprNode, is ContinueExprNode -> true
+            is UnaryExprNode -> expr.operand.diverges
+            is ReferenceExprNode -> expr.operand.diverges
+            is BinaryExprNode -> expr.left.diverges || expr.right.diverges
+            is AssignExprNode -> expr.target.diverges || expr.value.diverges
+            is CallExprNode -> expr.callee.diverges || expr.args.any { it.diverges }
+            is MethodCallExprNode -> expr.receiver.diverges || expr.args.any { it.diverges }
+            is FieldExprNode -> expr.receiver.diverges
+            is IndexExprNode -> expr.receiver.diverges || expr.index.diverges
+            is CastExprNode -> expr.expr.diverges
+            is ArrayLitNode -> expr.elements.any { it.diverges } ||
+                (expr.repeat?.let { it.element.diverges || it.length.diverges } == true)
+            is StructLitNode -> expr.fields.any { it.value.diverges }
+            else -> false
+        }
         return type
     }
 
@@ -77,10 +96,14 @@ class ExprChecker(
         val elseBranch = node.elseBranch
         if (elseBranch == null) { // 没有else分支，直接走
             requireAssignable(thenType, UnitType, node.thenblock.span, "if without else")
+            // 没有 else 时 false 路径会继续执行，只有条件发散才让 if 发散。
+            node.diverges = node.condition.diverges
             return UnitType
         }
 
         val elseType = check(elseBranch, expected)
+        node.diverges = node.condition.diverges ||
+            (node.thenblock.diverges && elseBranch.diverges)
         return join(thenType, elseType, node.span, "if branches")
     }
 
@@ -105,6 +128,8 @@ class ExprChecker(
         } finally {
             ctx.loopStack.removeLast()
         }
+        // while 只有条件发散时才发散；循环体可能一次都不执行。
+        node.diverges = node.condition.diverges
         return UnitType                       // while 恒 ()
     }
 
@@ -122,6 +147,8 @@ class ExprChecker(
         for (breakType in loop.breakTypes) {
             result = join(result, breakType, node.span, "break values")
         }
+        // 没有 break ⇒ 永不结束；有 break 时，只有所有 break 载荷都发散才发散。
+        node.diverges = loop.breakDiverges.isEmpty() || loop.breakDiverges.all { it }
         return result
     }
 
@@ -139,6 +166,10 @@ class ExprChecker(
                 requireAssignable(valueType, it, value.span, "break value")
             }
             loop.breakTypes.add(valueType)
+            loop.breakDiverges.add(value.diverges)
+        } else {
+            // 裸 break 的隐式 () 载荷不发散。
+            loop.breakDiverges.add(false)
         }
         return NeverType
     }

@@ -130,4 +130,7 @@ class LoopContext(
 ) {
     /** `loop` 收集到的所有 break 载荷类型；空 = 循环永不正常结束（`!`）。 */
     val breakTypes: MutableList<Type> = mutableListOf()
+
+    /** 每个 break 载荷是否发散；裸 `break` 的隐式 `()` 载荷不算发散。 */
+    val breakDiverges: MutableList<Boolean> = mutableListOf()
 }
